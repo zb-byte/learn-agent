@@ -13,7 +13,7 @@ Claude Code 最值得学习的地方，不是它有多少个工具，也不是�
 ```text
 任务推进：决定模型、工具、恢复、结束谁来接下一棒
 行为约束：用 Prompt Engineering 让模型尽量做正确选择
-工作现场：管理模型每轮能看到什么、记住什么、丢弃什么
+上下文管理：管理模型每轮能看到什么、记住什么、丢弃什么
 工具调用：把模型的 tool_use 变成可校验、可授权、可回填的动作
 安全防线：防止外部内容和模型输出越过权限边界
 能力扩展：让 Skill / Plugin / MCP / 子 Agent 按需进入
@@ -35,7 +35,7 @@ flowchart TD
     B --> C["Agent Loop<br/>queryLoop 状态机"]
 
     C --> D["Prompt Engineering<br/>行为控制面"]
-    C --> E["Context / Memory<br/>模型工作现场"]
+    C --> E["Context / Memory<br/>模型运行上下文"]
     E --> F["Compression / Cache<br/>上下文生命周期"]
 
     C --> G{"模型返回 tool_use?"}
@@ -226,13 +226,18 @@ Claude Code 的 Prompt Engineering 主要有三层：
 
 #### 2.1 系统提示词分段
 
-Claude Code 会把系统提示词拆成多段：
+Claude Code 会把系统提示词拆成多段，但这里有两条不同的轴，不应该混成一类。
 
-- 普通稳定段；
-- 动态段；
-- 必须每轮重新计算的段；
-- 缓存边界前的静态内容；
-- 缓存边界后的会话相关内容。
+第一条轴是 section 的计算策略：
+
+- 普通 `systemPromptSection`：会话内计算后缓存，直到 `/clear` 或 `/compact` 清掉；
+- 少数 `DANGEROUS_uncachedSystemPromptSection`：每轮重新计算，变化时会打断 prompt cache。
+
+第二条轴是 prompt cache 的边界策略：
+
+- `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 之前是稳定系统提示词前缀；
+- `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 之后是用户、会话、环境、扩展相关内容；
+- 边界前后影响的是 API 层的 `cacheScope`，不是 section 是否每轮重新计算。
 
 这么做不是为了“写得好看”，而是为了三件事：
 
@@ -278,7 +283,7 @@ numeric_length_anchors / token_budget / brief // 按特性开关加入的可选�
 
 其中 `getSimpleIntroSection`、`getSimpleSystemSection` 这类是源码里的函数名；`session_guidance`、`memory` 这类是 section 名；`SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 是源码里的边界常量。
 
-这一步只回答“系统提示词由哪些内容、按什么顺序组成”。真正进入 API 前，还会再经过一次缓存分拣：
+这一步只回答“系统提示词由哪些内容、按什么顺序组成”。真正进入 API 前，还会再经过一次缓存分拣。也就是说，`resolvedDynamicSections` 里的内容可能来自会话内缓存，并不天然等于“每轮新算”；而 `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 之后的内容也不是不能进入模型，只是不会作为跨用户、跨组织稳定前缀去做 global cache。
 
 ```text
 边界前的稳定内容 -> static block
@@ -295,7 +300,7 @@ dynamic block -> cacheScope: null    // 边界后的会话动态内容不加 cac
 所以这里不是“整段请求都走 global cache”，而是“静态 system prompt 前缀会被标记为 global cache”。最终是否命中缓存，还取决于这段静态前缀是否和后端已有缓存完全匹配。
 
 
-这就是系统提示词分段的核心价值：内容组织、行为约束、缓存稳定性在同一条链路里被同时处理。
+这就是系统提示词分段的核心价值：内容组织、行为约束、section 计算缓存、API prompt cache 在同一条链路里协作，但它们不是同一个概念。
 
 对应到实现里的几个角色：
 
@@ -450,11 +455,11 @@ Context / API / Tool 执行层分别处理上下文规范化、请求组装、�
 这一章回答：
 
 ```text
-Claude Code 如何管理模型的工作现场？
+Claude Code 如何管理模型的运行上下文？
 哪些内容要保留？
 哪些内容要压缩？
 哪些内容要缓存？
-会话中断或压缩后，哪些运行现场需要补回来？
+会话中断或压缩后，哪些上下文状态需要补回来？
 ```
 
 这里包含四个基础机制：Context、Memory、Compression、Prompt Cache。会话中断和压缩后的恢复问题，会在核心实现逻辑的 `3.5 Recovery` 中单独展开。
@@ -491,11 +496,11 @@ Prompt Cache 决定稳定前缀如何复用。
   -> 恢复最近读过的文件状态、Skill、Plan、Delta 附件
 ```
 
-这个例子里，Context、Memory、Compression 不是三套孤立机制，而是在同一个“工作现场”里接力：当前轮要看什么、跨轮要记什么、太大时要删什么、删完后要补回什么。
+这个例子里，Context、Memory、Compression 不是三套孤立机制，而是在同一份运行上下文里接力：当前轮要看什么、跨轮要记什么、太大时要删什么、删完后要补回什么。
 
 ### 核心实现逻辑
 
-#### 3.1 Context：模型看到的是整理后的运行现场
+#### 3.1 Context：模型看到的是整理后的运行上下文
 
 ##### 核心设计
 
@@ -594,7 +599,7 @@ userContext -> prependUserContext(messagesForQuery, userContext)
 | 情景记忆 | 这次会话发生过什么，能否恢复这段经历 | transcript JSONL、parent chain |
 | 语义记忆 / 长期记忆 | 项目规则、用户偏好、团队约定 | `CLAUDE.md` / memory prompt / system context |
 | 程序化记忆 | 做事方法、工具使用习惯、技能流程 | system prompt、tool prompt、Skill 内容 |
-| 外部工作现场记忆 | 模型看过哪些文件、工具结果、计划状态 | `FileStateCache`、Plan、Delta 附件 |
+| 外部上下文状态 | 模型看过哪些文件、工具结果、计划状态 | `FileStateCache`、Plan、Delta 附件 |
 
 在 Claude Code 里，记忆更像一组按用途和寿命拆开的状态容器。上面的“记忆类型”是理解入口；落到源码实现后，问题会变成：这些记忆分别应该放在哪个容器里、活多久、由谁恢复。
 
@@ -639,7 +644,7 @@ class QueryEngine {
   // 工作记忆 / 情景记忆：当前 conversation 的消息历史；多轮 submitMessage 都会复用
 
   readFileState: FileStateCache
-  // 外部工作现场记忆：模型已读文件状态；记录内容、mtime、offset，用于编辑和压缩后恢复
+  // 外部上下文状态：模型已读文件状态；记录内容、mtime、offset，用于编辑和压缩后恢复
 
   totalUsage: Usage
   // 运行状态记忆：当前会话累计 token 使用情况；用于统计和上下文判断
@@ -835,7 +840,7 @@ return { boundaryMarker, summaryMessages, attachments, hookResults }
   -> delta attachments             // 补回工具、Agent、MCP 等动态声明
 ```
 
-这就是 Claude Code 压缩机制最值得学习的地方：它不是把上下文变短就结束，而是在变短之后重新构造一个可继续工作的现场。
+这就是 Claude Code 压缩机制最值得学习的地方：它不是把上下文变短就结束，而是在变短之后重新构造一个可继续工作的上下文。
 
 #### 3.4 Prompt Cache：为什么稳定前缀很重要
 
@@ -940,9 +945,9 @@ post-compact restoration
 
 ### 工程启发
 
-Claude Code 的上下文不是“历史消息拼接”，而是一个持续维护的工作现场。
+Claude Code 的上下文不是“历史消息拼接”，而是一套持续维护的运行上下文。
 
-这个工作现场里有：
+这套运行上下文里有：
 
 - 当前模型可见上下文；
 - 可恢复 transcript；
@@ -951,7 +956,7 @@ Claude Code 的上下文不是“历史消息拼接”，而是一个持续维�
 - prompt cache 稳定前缀；
 - 动态附件和工具结果预算。
 
-长任务稳定性，很大程度来自这套工作现场管理。
+长任务稳定性，很大程度来自这套运行上下文管理。
 
 ---
 
@@ -1136,7 +1141,7 @@ Prompt Injection 容易被误解成“模型在调用工具前看到了一段恶
 
 ```text
 外部内容
-  -> Context：作为文件、网页、工具结果或历史片段进入模型工作现场
+  -> Context：作为文件、网页、工具结果或历史片段进入模型运行上下文
   -> Prompt：模型需要判断它是“待处理数据”还是“上级指令”
   -> Model Decision：模型可能把它转成读取、写入、联网、执行命令等行动意图
   -> Tool Runtime：tool_use 被 schema、语义规则、权限和 hooks 检查
@@ -1582,7 +1587,7 @@ Multi-Agent 解决的是：
 | AgentDefinition | 使用哪个 Agent、具备什么默认行为，由运行时定义 |
 | 工具上下文 | 子 Agent 可用工具不是无限开放，而是由上下文配置决定 |
 | 权限边界 | 子 Agent 仍然受 Tool Runtime、Permission、Hooks、Sandbox 约束 |
-| 上下文隔离 | 子 Agent 有自己的工作现场，不把所有探索噪声带回主上下文 |
+| 上下文隔离 | 子 Agent 有自己的运行上下文，不把所有探索噪声带回主上下文 |
 | 生命周期 | 同步返回、后台运行、清理和结果回填都由运行时管理 |
 
 这和“并行聊天”有本质区别。子 Agent 更像一个被派出去完成特定任务的运行舱：它可以独立阅读、分析、执行一段受限工作，但必须通过主运行时定义的入口、权限和生命周期回到主线。
@@ -1663,8 +1668,8 @@ Claude Code 的策略是：能力扩展轻量发现、按需加载；长任务�
 3. Prompt Engineering 建立行为边界。
    系统提示词、动态 section 和工具提示词一起约束模型：如何行动、如何用工具、如何保持简洁、如何看待外部内容。
 
-4. Context 层整理模型工作现场。
-   消息、系统上下文、用户上下文、工具结果、文件状态和外部内容边界，都会在这里被组织成模型可读的现场。
+4. Context 层整理模型运行上下文。
+   消息、系统上下文、用户上下文、工具结果、文件状态和外部内容边界，都会在这里被组织成模型可读的上下文。
 
 5. Memory 层保留不同寿命的状态。
    transcript、FileStateCache、压缩摘要、已调用 Skill、进程锁存等状态，决定任务跨轮、跨压缩、跨恢复时还能记住什么。

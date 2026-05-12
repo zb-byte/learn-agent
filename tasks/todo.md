@@ -147,3 +147,31 @@
 - 已补充“输入 / 处理 / 输出”视角的分层表，帮助读者看清 QueryEngine、Agent Loop、Prompt / Context、Model、Tool Runtime、Memory / Compression、Extension、Reliability 的边界。
 - 已增加“修改代码并验证”的典型链路示例，串起工具调用、结果回填、测试失败继续修正、压缩和恢复路径。
 - 已保留总结判断：Claude Code 的核心价值来自多个模块围绕 Agent Loop 形成闭环。
+
+---
+
+# 任务：校准系统提示词分段与 Prompt Cache 描述
+
+## 需求规格
+
+- 目标文档：`docs/claude-code-agent-runtime-sharing.md`
+- 优化目标：根据源码澄清 system prompt section 的计算策略与 prompt cache 边界策略，避免把“动态段”“每轮重算”“缓存边界后”混为一谈。
+- 风格要求：直接更新文档，保持工程导读表达，不展开源码逐行说明。
+- 边界要求：不把 `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 写成 section 计算缓存；不把 `resolvedDynamicSections` 全部写成每轮重新计算。
+
+## 执行计划
+
+- [x] 检查第 2.1 和第 3 章相关表述。
+  - 摘要：确认原文存在“稳定段 / 动态段 / 每轮重算 / 缓存边界”并列的问题，且“工作现场”作为核心术语不够贴近源码。
+- [x] 更新文档正文。
+  - 摘要：将第 2.1 改成两条轴：section 计算策略和 prompt cache 边界策略；将“工作现场”替换为“运行上下文 / 上下文状态”。
+- [x] 校验 Markdown 结构和 diff。
+  - 摘要：已确认旧的并列式描述和“工作现场”残留被清除，`git diff --check` 无空白错误。
+- [x] 结果归档。
+  - 摘要：记录最终改动和验证结果。
+
+## 结果复盘
+
+- 已将第 2.1 的系统提示词分段说明改为两条轴：`systemPromptSection` / `DANGEROUS_uncachedSystemPromptSection` 负责 section 计算策略，`SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 负责 API prompt cache 边界。
+- 已明确 `resolvedDynamicSections` 不等于全部每轮重算，缓存边界之后也不等于不能进入模型。
+- 已将文档中“工作现场”统一改成“运行上下文 / 上下文状态 / 上下文管理”，避免引入源码里没有的核心术语。
