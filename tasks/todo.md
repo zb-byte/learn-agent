@@ -387,3 +387,61 @@
 - 已在 6.4 结尾补充 Multi-Agent 的工程启发，强调动作并发与任务派生分层、策略层与执行层分离、受控执行单元、fork / fresh 分治。
 - 新增段落承接 6.4 机制总结，并自然过渡到 6.5 的长任务可靠性主题。
 - 已执行 `git diff --check`，清理掉 4 处行尾空格后通过。
+
+---
+
+# 任务：检查 Claude Runtime 文档面向 auto-mind 开发者的优化点
+
+## 需求规格
+
+- 目标文档：`docs/claude-code-agent-runtime-sharing.md`
+- 目标受众：`/Users/wangzhongbin/Documents/code/630/auto-mind` 的开发者。
+- 分析目标：指出当前文档如果作为 auto-mind 团队学习/对标材料，哪些章节需要调整表达、补充映射或降低 Claude Code 特有实现的干扰。
+- 输出要求：按优先级给出优化点，包含章节位置、问题、建议改法。
+- 边界要求：本次只检查并给建议，不直接改正文；结论需结合 auto-mind 当前实现，不把未实现能力说成已有能力。
+
+## 执行计划
+
+- [x] 检查文档结构和 Claude Code 特有章节分布。
+  - 摘要：重点看第 0-7 章是否缺少 auto-mind 映射入口。
+- [x] 对照 auto-mind 当前主链路和上下文/执行文档。
+  - 摘要：参考 `.agents/runtime-flow.md`、`context-and-rendering.md`、`execution-and-observation.md`。
+- [x] 梳理面向 auto-mind 开发者的主要阅读障碍。
+  - 摘要：区分术语不对齐、能力成熟度不对齐、章节缺少落地建议三类问题。
+- [x] 交叉校验并输出优化建议。
+  - 摘要：结合独立审阅视角，给出最终建议清单。
+
+## 结果复盘
+
+- 已确认目标文档当前没有出现 `auto-mind`、`AgentService`、`MAIN`、`NAVI`、`NLG`、`ProgressManager` 等对照词，缺少面向 auto-mind 开发者的概念翻译层。
+- 已确认主要优化方向不是压缩 Claude Code 机制，而是在关键章节补充“auto-mind 对照 / 当前状态 / 不可直接类比”的提示。
+- 已整理 7 个优先优化点：开篇映射表、MAIN/NAVI/NLG 任务链路、Context 与 Render 分层、ProgressManager/Executor/Observer 执行闭环、Intervene 安全边界、Skill/Plugin/Multi-Agent 状态标注、Memory/Trace/Recovery 拆分。
+
+---
+
+# 任务：隐性优化 Claude Runtime 文档的工程启发
+
+## 需求规格
+
+- 目标文档：`docs/claude-code-agent-runtime-sharing.md`
+- 优化目标：在不显式提到 auto-mind 或“自研 Runtime”的前提下，让文档的工程启发更适合 Agent Runtime 开发者吸收。
+- 内容约束：任何机制判断必须基于 `code-src` 下 Claude Code 源码，不基于推测或项目对照。
+- 表达约束：不写“对照 auto-mind”“迁移到自研 Runtime”“你们当前已有/没有”等显性映射；只自然提炼 Claude Code 的设计原则。
+- 验证要求：检查正文中不出现不该出现的显式措辞，并检查 Markdown diff。
+
+## 执行计划
+
+- [x] 从 `code-src` 校准 Agent Loop、Context、Tool、Safety、Extension、Recovery 的关键源码事实。
+  - 摘要：已核对 `query.ts`、`QueryEngine.ts`、`toolOrchestration.ts`、`StreamingToolExecutor.ts`、`toolResultStorage.ts`、`autoCompact.ts`、`sessionRestore.ts`、`runAgent.ts`、plugin schema 与 hooks 配置等源码入口。
+- [x] 调整各章“工程启发”和少量总结语。
+  - 摘要：已增强状态迁移、运行现场、工具执行链、安全分层、Multi-Agent 派生和恢复能力的工程启发，保持 Claude Code 导读外观。
+- [x] 清理显性项目映射措辞。
+  - 摘要：已删除正文中“对我们设计自己的 Agent Runtime”这类显性映射表达，避免把文档写成项目对照材料。
+- [x] 校验 diff、禁用词和 Markdown 结构。
+  - 摘要：已检查目标正文不含 `auto-mind`、`自研`、`对照`、`迁移到`、`你们`、`我们设计自己的` 等显性措辞；代码围栏数量为偶数，`git diff --check` 通过。
+
+## 结果复盘
+
+- 已完成 `docs/claude-code-agent-runtime-sharing.md` 的隐性优化：不写项目对照，不提“自研 Runtime”，只在 Claude Code 导读语境下强化工程启发。
+- 改动集中在 Agent Loop、Context、Tool、Safety、Multi-Agent、Recovery 的“工程启发”与少量总结语，机制判断均先用 `code-src` 源码入口校准。
+- 已通过禁用词检查、Markdown 代码围栏检查和 `git diff --check`。
