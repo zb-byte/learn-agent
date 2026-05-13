@@ -175,3 +175,215 @@
 - 已将第 2.1 的系统提示词分段说明改为两条轴：`systemPromptSection` / `DANGEROUS_uncachedSystemPromptSection` 负责 section 计算策略，`SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 负责 API prompt cache 边界。
 - 已明确 `resolvedDynamicSections` 不等于全部每轮重算，缓存边界之后也不等于不能进入模型。
 - 已将文档中“工作现场”统一改成“运行上下文 / 上下文状态 / 上下文管理”，避免引入源码里没有的核心术语。
+
+---
+
+# 任务：重写 6.4 Multi-Agent 章节
+
+## 需求规格
+
+- 目标文档：`docs/claude-code-agent-runtime-sharing.md`
+- 目标小节：`#### 6.4 Multi-Agent：把复杂任务拆给受控子 Agent`
+- 优化目标：汇总前两轮源码讨论，补足何时使用多 Agent、与并行 tool call 的区别、fork / fresh 子 Agent 的边界、Agent 记忆是否独立，以及 Multi-Agent 的核心收益。
+- 风格要求：直接替换现有章节，保持全文工程导读风格，既讲机制，也讲判断标准。
+- 边界要求：不把 tool 并行误写成 Multi-Agent，不把 fork 与 fresh subagent 混同，不把 Agent 记忆说成完全共享或完全割裂。
+
+## 执行计划
+
+- [x] 检查当前 6.4 内容和相邻章节衔接。
+  - 摘要：原章节已说明“受控派生”，但对使用时机、tool 并行差异、记忆隔离层次还不够完整。
+- [x] 用源码结论重写 6.4。
+  - 摘要：新增使用时机表、tool vs Multi-Agent 对照、fork / fresh 区分、记忆分层表和受控边界总结。
+- [x] 校验 Markdown 结构、术语一致性和 diff。
+  - 摘要：已检查章节替换后的表格、代码块和术语；`git diff --check` 无空白错误。
+- [x] 结果归档。
+  - 摘要：记录最终改动和验证结果。
+
+## 结果复盘
+
+- 已用“使用时机、与并行 tool 的区别、收益、fork / fresh 区分、记忆独立性、受控边界”六块内容重写 6.4。
+- 已明确：并行 tool call 是动作级并行，Multi-Agent 是任务级派生。
+- 已补充 Agent 记忆的分层结论：运行态隔离、fresh / fork 上下文差异、独立 agent memory、sidechain transcript。
+- 已保留与 Skill / Plugin / MCP 的机制区分，避免把 Multi-Agent 写成能力接入层。
+
+---
+
+# 任务：重写 6.5 Recovery / Resume / Fallback
+
+## 需求规格
+
+- 目标文档：`docs/claude-code-agent-runtime-sharing.md`
+- 目标小节：`#### 6.5 Recovery / Resume / Fallback：长任务不断线`
+- 优化目标：结合源码，把该节从“异常分类表”升级为“Claude Code 为了长任务持续性补齐了哪些系统能力”，并提炼对 Agent Runtime 设计的启发。
+- 风格要求：保持工程导读语气，重点讲系统能力和设计思路，不写成源码逐行注释。
+- 边界要求：不把 recovery 简化成 retry；不把 resume 简化成加载 transcript；不漏掉 subagent resume 和交互层 auto-restore。
+
+## 执行计划
+
+- [x] 梳理 Overflow Recovery、Output Recovery、Model Fallback、Resume、Post-Compact Restoration、Agent Resume、UX Recovery 的源码证据。
+  - 摘要：确认 query、REPL、compact、resumeAgent 等路径各自补齐了不同断点。
+- [x] 重写 6.5 章节。
+  - 摘要：按“恢复能力地图 -> 六类机制 -> 工程启发”重组正文，突出系统完整性。
+- [x] 校验 Markdown 结构、术语一致性和 diff。
+  - 摘要：已完成 diff 检查并清理 3 处行尾空格；`git diff --check` 通过。
+- [x] 结果归档。
+  - 摘要：记录最终改动和验证结果。
+
+## 结果复盘
+
+- 已将 6.5 从“异常 -> 手段”的静态表格，改写为“Claude Code 为持续工作补齐哪些恢复能力”的系统讲解。
+- 已覆盖运行中恢复、压缩后恢复、中断后恢复三条主线，并补充模型 fallback、subagent resume、用户取消后的 prompt auto-restore。
+- 已强调 Resume 恢复的是可继续工作的运行环境，而不只是 transcript；Recovery 也不是 retry 的别名，而是一整套续跑策略。
+
+---
+
+# 任务：补充用户挫败信号的文档说明
+
+## 需求规格
+
+- 目标文档：`docs/claude-code-agent-runtime-sharing.md`
+- 优化目标：基于源码，补充 Claude Code 对“用户可能处于挫败/暴躁状态”的处理边界。
+- 放置原则：不把这部分误写成安全机制、恢复机制或完整情绪管理系统；更适合作为运行时总链路中的交互质量观测补充。
+- 风格要求：点到为止，维持全文工程导读语气。
+
+## 执行计划
+
+- [x] 检查现有章节结构并确定插入位置。
+  - 摘要：第 7 章负责把运行时能力重新拼回一轮任务，适合补充“系统也会记录交互质量信号”的说明。
+- [x] 更新文档正文。
+  - 摘要：新增一段简短说明，澄清源码中可见的是负面关键词检测、埋点和内部反馈收集入口，而非通用情绪安抚机制。
+- [x] 校验 Markdown 结构和 diff。
+  - 摘要：确认新增内容不打断第 7 章主链路，且表述与源码结论一致。
+- [x] 结果归档。
+  - 摘要：记录最终改动和验证结果。
+
+## 结果复盘
+
+---
+
+# 任务：分析 auto-mind 的运行时能力
+
+## 需求规格
+
+- 分析对象：`/Users/wangzhongbin/Documents/code/630/auto-mind`
+- 参考视角：`docs/claude-code-agent-runtime-sharing.md`
+- 分析目标：提炼 auto-mind 已具备的 Agent Runtime 能力，包括任务推进、上下文/状态共享、工具与执行、记忆、干预、安全、可观测性与恢复机制。
+- 输出要求：以“能力清单 + runtime sharing 映射 + 总体判断”为主，不做逐文件流水账。
+- 边界要求：结论必须能回指到仓库文档或源码，不把设计意图和已实现能力混为一谈。
+
+## 执行计划
+
+- [x] 回顾参考文档的分析框架，并确定 auto-mind 的映射维度。
+  - 摘要：围绕 Agent Loop、Context / Memory、Tool Runtime、Security、Extension、Reliability 组织分析。
+- [x] 阅读 auto-mind 的 README、架构文档和核心入口类。
+  - 摘要：定位系统边界、请求入口、执行主链路与主要角色。
+- [x] 梳理 auto-mind 的运行时共享模型。
+  - 摘要：重点检查 RequestSession、RequestScope、ContextSnapshot、CurrentTurn、EventBus、Observation drain 等结构。
+- [x] 提炼能力清单与局限，并和参考文档逐项映射。
+  - 摘要：区分“已经形成运行时能力”“只是局部基础设施”“暂未看到”的项目。
+- [x] 做交叉校验并完成结果归档。
+  - 摘要：回看测试与文档证据，整理最终判断。
+
+## 结果复盘
+
+- 已确认 auto-mind 当前最成熟的是请求级 Agent Runtime：`AgentService` 串起 MAIN / NAVI / NLG，`Context` 与 `CurrentTurnManager` 负责快照、回灌、drain、持久化。
+- 已确认其 runtime sharing 主要落在三层：`RequestScope / RequestSession` 的请求级共享、`ContextSnapshot` 的模型输入共享、`EventBus + ObservationDrainCoordinator` 的执行结果回流共享。
+- 已按 Claude Runtime 文档视角区分能力成熟度：Tool Runtime、Memory、Trace、Intervene 较完整；Skill / Plugin / Multi-Agent / Resume / Compact Restoration 仍偏局部基础或设计愿景。
+- 已交叉检查 `.agents/` 文档、核心源码与对应测试入口，并执行 `git diff --check -- tasks/todo.md`，未发现新增格式问题。
+
+---
+
+# 任务：重排 6.4 Multi-Agent 与第 4 章 Tool 调度说明
+
+## 需求规格
+
+- 目标文档：`docs/claude-code-agent-runtime-sharing.md`
+- 优化目标：
+  - 基于源码澄清 Multi-Agent 的使用时机到底是“模型判断”还是“运行时规则判断”；
+  - 把 tool call 的并发 / 串行执行机制移回第 4 章，讲清动作级调度；
+  - 让 6.4 的讲解更连续，不在“使用时机、收益、fork、记忆、控制点”之间来回跳。
+- 关键源码结论：
+  - `AgentTool` 是否被调用，主要由模型基于 system prompt / tool prompt 决定；运行时负责调用后的解析、过滤和执行；
+  - `runTools -> partitionToolCalls` 会按 `isConcurrencySafe(...)` 把一组 tool calls 分成可并发批次与串行批次；
+  - 复杂搜索、fork、自定义 Agent、verification 等使用建议来自提示词和 Agent 定义，而不是一个统一的硬编码复杂度分类器。
+
+## 执行计划
+
+- [x] 核验 `AgentTool` 的提示词、调用分流和 fork / fresh 路径。
+  - 摘要：确认“什么时候使用 AgentTool”主要是模型在提示词引导下作出调用选择，运行时不做统一复杂度自动判定。
+- [x] 核验 tool call 的并发 / 串行编排。
+  - 摘要：确认模型可在同一轮返回多个 `tool_use`，运行时再按 `isConcurrencySafe(...)` 分批执行；并发批次有上限，串行批次会逐个更新上下文。
+- [x] 更新第 4 章与 6.4 正文。
+  - 摘要：第 4 章补动作级调度，第 6.4 改任务级派生。
+- [x] 校验 Markdown 结构和 diff。
+  - 摘要：确认章节边界更清楚、无重复解释、无格式问题。
+- [x] 结果归档。
+  - 摘要：记录最终改动和验证结果。
+
+## 结果复盘
+
+- 已在第 4 章补充 tool call 的两层机制：模型在提示词引导下提出并行工具意图，运行时再按 `isConcurrencySafe(...)` 做分批并发 / 串行调度。
+- 已明确 `partitionToolCalls(...)` 的失败关闭策略、并发批次与串行批次的上下文更新差异，以及默认并发上限。
+- 已重写 6.4 前半段，澄清 Multi-Agent 的使用时机主要由模型结合提示词、`AgentTool` prompt 和 `AgentDefinition.whenToUse` 作出判断，而不是统一硬编码复杂度规则。
+- 已把 “tool 并发” 与 “Multi-Agent 任务级派生” 彻底拆开，章节职责更清楚。
+- 已执行 `git diff --check`，未发现空白格式问题。
+
+---
+
+# 任务：补充 4.2 中 isConcurrencySafe 的判断逻辑
+
+## 需求规格
+
+- 目标文档：`docs/claude-code-agent-runtime-sharing.md`
+- 目标小节：`#### 4.2 并发不是模型说了算，最终由运行时分批调度`
+- 优化目标：总结 `isConcurrencySafe(...)` 允许并发的几类判断模式，明确它不等价于“是否只读”。
+- 关键源码结论：
+  - 有些工具直接固定返回 `true`；
+  - 有些工具基于具体输入动态判断，比如 `Bash` / `PowerShell` 依赖只读性分析；
+  - 工具未声明、schema 失败或判断抛错时，运行时默认不可并发。
+
+## 执行计划
+
+- [x] 梳理源码中 `isConcurrencySafe(...)` 的三类模式。
+  - 摘要：固定可并发、基于输入动态判断、失败关闭默认串行。
+- [x] 更新第 4.2 正文。
+  - 摘要：把“允许并发的判断逻辑”整理成表述清楚的总结段。
+- [x] 校验 Markdown 结构和 diff。
+  - 摘要：确认新增内容不和现有 4.2 冲突，也不把 `isConcurrencySafe` 写窄。
+- [x] 结果归档。
+  - 摘要：记录最终改动和验证结果。
+
+## 结果复盘
+
+- 已在 4.2 补充 `isConcurrencySafe(...)` 的三类判断模式：固定可并发、按输入动态判断、未声明或判断失败时默认串行。
+- 已明确“是否只读”只是并发安全的重要依据之一，不等价于 `isConcurrencySafe(...)` 的完整语义。
+- 已保留原有工具示例，并把总结前置为机制解释，阅读顺序更顺。
+- 已执行 `git diff --check`，未发现空白格式问题。
+
+---
+
+# 任务：补充 6.4 Multi-Agent 的工程启发
+
+## 需求规格
+
+- 目标文档：`docs/claude-code-agent-runtime-sharing.md`
+- 目标位置：`#### 6.4 Multi-Agent：把复杂任务拆给受控子 Agent` 结尾，进入 6.5 之前。
+- 优化目标：结合前面对 Multi-Agent 使用时机、fork / fresh、上下文隔离和受控边界的讲解，提炼对自研 Agent Runtime 的设计启发。
+- 风格要求：讲原则，不重复前文机制细节；让读者看到“为什么这套设计值得借鉴”。
+
+## 执行计划
+
+- [x] 检查 6.4 结尾和 6.5 开头的衔接位置。
+  - 摘要：6.4 已完整讲完机制，适合在 Recovery 之前补一段小结式工程启发。
+- [x] 更新 6.4 正文。
+  - 摘要：补充“什么时候值得派生子 Agent、如何限制边界、如何兼顾 cache 与上下文成本”等工程原则。
+- [x] 校验 Markdown 结构和 diff。
+  - 摘要：确认新增段落不重复已有内容，也不打断 6.5 开头。
+- [x] 结果归档。
+  - 摘要：记录最终改动和验证结果。
+
+## 结果复盘
+
+- 已在 6.4 结尾补充 Multi-Agent 的工程启发，强调动作并发与任务派生分层、策略层与执行层分离、受控执行单元、fork / fresh 分治。
+- 新增段落承接 6.4 机制总结，并自然过渡到 6.5 的长任务可靠性主题。
+- 已执行 `git diff --check`，清理掉 4 处行尾空格后通过。

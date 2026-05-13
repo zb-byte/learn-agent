@@ -1039,16 +1039,71 @@ Tool 接口契约
 
 这叫失败关闭。
 
-#### 4.2 执行前有校验和调度
+#### 4.2 并发不是模型说了算，最终由运行时分批调度
 
-模型返回一组 `tool_use` 后，执行层会先分区：
+Claude Code 会先在提示词层鼓励模型这样做：
 
 ```text
-并发安全工具 -> 可以并行
-写入 / 危险 / 依赖上下文修改的工具 -> 串行
+如果多个工具彼此独立，
+就在同一轮响应里一次返回多个 tool_use；
+如果后一个调用依赖前一个结果，
+就分轮顺序调用。
 ```
 
-单个工具调用会经过：
+也就是说，模型负责表达“这些动作看起来可以一起做”的意图。
+
+但真正决定能不能并发执行的，还是运行时。
+
+`runTools(...)` 拿到一组 `tool_use` 后，会通过 `partitionToolCalls(...)` 按每个工具的 `isConcurrencySafe(...)` 结果切批：
+
+```text
+连续的 concurrency-safe 工具
+  -> 合并成一个并发批次
+
+非 concurrency-safe 工具
+  -> 自成一个串行批次
+```
+
+源码里还做了两层保守处理：
+
+- schema 校验失败，直接按“不可并发”处理；
+- `isConcurrencySafe(...)` 自己抛错，也按“不可并发”处理。
+
+这意味着并发调度是失败关闭的。
+
+`isConcurrencySafe(...)` 本身不是“只读判断函数”，而是“这个具体工具调用能不能进入并发批次”的最终声明。源码里大致有三种模式：
+
+| 判断模式 | 含义 | 例子 |
+|---|---|---|
+| 固定声明可并发 | 这类工具天然不依赖共享顺序，直接返回 `true` | `Read`、`Glob`、`Grep`、`AgentTool` |
+| 基于输入动态判断 | 同一个工具，有的输入可并发，有的不能 | `Bash`、`PowerShell` 会先判断当前命令是否只读 |
+| 未声明或判断失败 | 没有明确并发资格，或判断链路出错 | 默认按不可并发处理 |
+
+因此，“是否只读”是判断并发安全的**重要依据**，但不是 `isConcurrencySafe(...)` 的全部语义。
+
+几个典型例子：
+
+| 工具 | 并发判断 |
+|---|---|
+| `Read` / `Glob` / `Grep` | 固定可并发 |
+| `AgentTool` | 可并发，便于一次发起多个子任务 |
+| `Bash` | 只有当命令被判定为只读时，才视为可并发 |
+| 写文件、会改变共享状态的工具 | 更保守，进入串行路径 |
+
+执行时，两种批次的上下文处理也不同：
+
+- 并发批次会同时执行，再按工具顺序回放 context modifier；
+- 串行批次则是一个完成后，立刻把上下文更新带入下一个调用；
+- 并发上限默认是 `10`，可由 `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` 调整。
+
+因此可以把 Claude Code 的 tool 调度拆成两层：
+
+```text
+模型层：决定“这一轮要不要提出多个独立 tool_use”
+运行时：决定“这些 tool_use 最终并发跑，还是串行跑”
+```
+
+单个工具调用本身，则继续沿着原来的链路执行：
 
 ```text
 查找工具
@@ -1088,6 +1143,16 @@ schema -> hooks -> permission -> concurrency -> execution -> result budget -> to
 ```
 
 工具系统的成熟度，决定了模型能不能稳定、安全、低成本地行动。
+
+其中并发机制的关键，不是“让模型多调几个工具”，而是把：
+
+```text
+模型侧的并行动机
+和
+运行时的并发判定
+```
+
+分成两层，既保留效率，又不把调度安全性交给模型猜。
 
 ---
 
@@ -1549,23 +1614,62 @@ MCP 让外部工具以统一协议进入工具系统。
 
 #### 6.4 Multi-Agent：把复杂任务拆给受控子 Agent
 
-Multi-Agent 解决的是：
+Multi-Agent 解决的不是“怎么把几个动作同时做掉”，而是：
 
 ```text
-复杂任务里，哪些工作不应该挤在主 Agent 的上下文里完成。
+复杂任务里，哪些工作值得交给另一个执行体单独完成。
 ```
 
-长任务经常会出现几类可以拆出去的工作：
+先澄清一个关键点：
 
-- 大范围代码探索；
-- 多方案调研对比；
-- 独立验证或日志分析；
-- 不同模块的并行排查；
-- 需要较长上下文但结论可以压缩返回的子任务。
+```text
+Claude Code 并没有先跑一套统一的“任务复杂度分类器”，
+再由运行时自动决定要不要启用 Multi-Agent。
+```
 
-如果这些工作都由主 Agent 亲自展开，主上下文会很快被大量中间信息占满。子 Agent 的价值，是把一段独立任务放进单独运行环境里执行，最后只把结果、证据或必要摘要带回主线。
+从源码看，`AgentTool` 是否被调用，主要还是**模型判断**：
 
-但这里的 Multi-Agent 不是多个模型自由聊天，也不是让子 Agent 任意行动。它是主 Agent 通过 `AgentTool` 发起的受控派生。
+- system prompt 会告诉模型，什么情况下值得调用 `AgentTool`；
+- `AgentTool` 自己的 prompt 会补充 fresh subagent、fork、后台执行等使用方式；
+- 每个 `AgentDefinition.whenToUse` 又会描述某个专门 Agent 适合什么任务。
+
+换句话说，Claude Code 是：
+
+```text
+先把“何时适合派生子 Agent”的判断标准写进提示词，
+再由模型决定是否发起 AgentTool 的 tool_use。
+```
+
+运行时负责的，不是“替模型做复杂度判断”，而是当 `AgentTool` 已经被调用后，把这个决定接住并严格落地。
+
+提示词里能看到几类明确引导：
+
+| 引导 | 含义 |
+|---|---|
+| 专门 Agent 匹配任务描述 | 如果任务和某个 `whenToUse` 对上，就优先考虑该 Agent |
+| 简单定向搜索先直接用搜索工具 | 文件名、类名、函数名这类窄问题，不要滥用 Agent |
+| 更广探索或明显需要多轮查询时再用 Explore Agent | Agent 适合承接更重的探索 |
+| fork 适合中间输出很多、但主线之后不再需要的工作 | 关键标准不是“任务大不大”，而是“这些中间输出要不要留在主上下文” |
+| verification Agent | 在特定 gate 下，非平凡实现完成后会被提示追加独立验证 |
+
+所以 Multi-Agent 真正解决的是：
+
+```text
+主 Agent 什么时候值得把一段任务，
+交给另一个执行体单独跑。
+```
+
+这和第 4 章的 tool 并发不同：
+
+```text
+tool 并发
+  -> 一轮里多个动作怎样调度
+
+Multi-Agent
+  -> 一段任务要不要派生独立执行体
+```
+
+当模型真的发起 `AgentTool` 后，运行时才进入“受控派生”链路。
 
 核心链路：
 
@@ -1573,24 +1677,62 @@ Multi-Agent 解决的是：
 模型调用 AgentTool
   -> 查找 AgentDefinition
   -> 选择普通子 Agent 或 fork
-  -> runAgent 构造独立运行环境
-  -> createSubagentContext 隔离工具和权限
+  -> AgentTool 解析工具池、权限模式、同步或异步策略
+  -> runAgent 构造 agent-specific system prompt、MCP、hooks、skills
+  -> createSubagentContext 隔离可变运行状态
   -> 同步返回或后台运行
   -> 生命周期清理
 ```
 
-“受控”体现在几层：
+Claude Code 这样做的直接收益，是把“任务组织”从“单上下文一路硬扛”里解放出来：
+
+- 主 Agent 继续负责决策和整合，不被大量中间工具结果拖满；
+- 开放式研究、独立验证、后台长任务可以单独跑；
+- 不同 Agent 可以带着不同工具、权限模式、hooks、skills、MCP；
+- fork Agent 在继承父上下文的同时，还能尽量复用父 prompt cache。
+
+这里要特别区分两类子 Agent：
+
+| 类型 | 上下文关系 | 适合场景 |
+|---|---|---|
+| fresh subagent | 从新的上下文起步，需要主 Agent 重新交代任务背景 | 专门 Agent、独立调查、独立验证 |
+| fork subagent | 继承父会话上下文和相同工具定义 | 主线已有很多背景，想把研究或多步实现拆出去 |
+
+fork 的关键价值，不只是“能继承上下文”，还包括：
+
+- 中间工具输出留在子 Agent 内部，不挤占主上下文；
+- 继承父系统提示词和 exact tools，尽量保持 prompt cache 前缀一致；
+- 适合开放式研究，或需要多步实现但主线不想被细节淹没的任务。
+
+Multi-Agent 的“独立”还体现在记忆层。
+
+| 记忆层 | 源码设计 |
+|---|---|
+| 运行态状态 | `readFileState` 会 clone，nested memory 触发器、dynamic skill 触发器等重新建集合，默认不和父 Agent 混写 |
+| 对话上下文 | fresh subagent 从零上下文开始；fork subagent 继承父 messages |
+| 持久 agent memory | Agent frontmatter 可声明 `user / project / local` memory，按 agent type 存到独立目录 |
+| transcript | 子 Agent 会写 sidechain transcript，恢复后可继续原有上下文 |
+
+因此“记忆是否独立”的准确回答是：
+
+```text
+运行态默认隔离；
+fresh 子 Agent 的对话上下文独立；
+fork 子 Agent 继承父上下文；
+Agent 还可以拥有按 agent type 划分的长期 memory；
+执行轨迹写入独立 sidechain transcript。
+```
+
+最后，“受控”仍然是 Multi-Agent 的底线：
 
 | 控制点 | 含义 |
 |---|---|
 | 任务入口 | 子 Agent 由主 Agent 明确发起，带着具体任务说明进入 |
 | AgentDefinition | 使用哪个 Agent、具备什么默认行为，由运行时定义 |
-| 工具上下文 | 子 Agent 可用工具不是无限开放，而是由上下文配置决定 |
-| 权限边界 | 子 Agent 仍然受 Tool Runtime、Permission、Hooks、Sandbox 约束 |
-| 上下文隔离 | 子 Agent 有自己的运行上下文，不把所有探索噪声带回主上下文 |
-| 生命周期 | 同步返回、后台运行、清理和结果回填都由运行时管理 |
-
-这和“并行聊天”有本质区别。子 Agent 更像一个被派出去完成特定任务的运行舱：它可以独立阅读、分析、执行一段受限工作，但必须通过主运行时定义的入口、权限和生命周期回到主线。
+| 工具上下文 | 子 Agent 的工具池独立解析，不是无限开放 |
+| 权限边界 | 子 Agent 仍受 Tool Runtime、Permission、Hooks、Sandbox 约束 |
+| 运行态隔离 | 隔离的是可变执行状态，避免父子互相污染 |
+| 生命周期 | 同步、异步、后台通知、清理、恢复都由运行时管理 |
 
 它和前面几个扩展机制的区别也可以这样理解：
 
@@ -1601,41 +1743,203 @@ Multi-Agent 解决的是：
 | MCP | 把外部工具接入统一工具池 |
 | Multi-Agent | 把复杂任务拆给隔离的执行单元 |
 
-所以 Multi-Agent 的重点不是“能力更多”，而是“任务组织更稳”。它让主 Agent 保持决策和整合位置，把高噪声、可并行、可隔离的部分交给子 Agent，减少主上下文压力，也让长任务更容易恢复和解释。
+所以 Multi-Agent 的重点不是“能力更多”，而是“任务组织更稳”。它让主 Agent 保持决策和整合位置，把高噪声、可并行、可隔离、可恢复的部分交给子 Agent，减少主上下文压力，也让长任务更容易持续推进。
+
+对我们设计自己的 Agent Runtime，这里至少有四点启发：
+
+1. **先区分动作并发和任务派生。**
+   多个独立工具调用，只需要并发调度；只有当一段工作需要独立上下文、独立流程或独立生命周期时，才值得派生子 Agent。
+
+2. **多 Agent 的判断标准要写进“策略层”，而不是偷塞进“执行层”。**
+   Claude Code 更像是先用 prompt、agent description 和能力约束教会模型“什么时候该派生”，再由运行时负责把调用严格接住。这样模型选择与执行裁决各守一层，系统更容易演进。
+
+3. **派生出来的不是“另一个聊天窗口”，而是一个受控执行单元。**
+   如果没有工具池、权限、上下文隔离、恢复、通知和生命周期管理，多 Agent 只会放大噪声和不确定性。真正有价值的是“受控派生”，不是“数量变多”。
+
+4. **fork 和 fresh 要分开设计。**
+   fresh 适合独立验证、独立判断；fork 适合继承背景、隔离中间输出、复用缓存。把两者混成一种模式，会同时损失独立性和效率。
+
+这说明，多 Agent 的工程价值不在于“让系统显得更聪明”，而在于给复杂任务增加一种新的组织维度：
+
+```text
+什么时候继续留在主线程；
+什么时候切出独立执行体；
+切出去以后，怎样带回最有价值的结果。
+```
 
 #### 6.5 Recovery / Resume / Fallback：长任务不断线
 
-长任务中断来源很多：
+Claude Code 对长任务的理解，不是“尽量别失败”，而是：
 
-- prompt-too-long；
-- 输出截断；
-- 模型临时错误；
-- 工具失败；
-- hook 阻止；
-- 压缩后状态断层；
-- 会话中断后恢复。
+```text
+失败会发生；
+关键是失败后还能不能继续工作。
+```
 
-Claude Code 会用不同机制处理：
+所以它围绕“不断线”补了一整套能力，而不是只做一个 `retry`。
 
-| 问题 | 处理方式 |
+| 能力 | 解决什么问题 |
 |---|---|
-| prompt-too-long | 先折叠，再压缩，失败才终止 |
-| max output tokens | 先扩容，再续写 |
-| 模型错误 | fallback model |
-| hook blocking | 把原因注入给模型修正 |
-| 会话中断 | 从 transcript 和状态恢复 |
-| 压缩后遗忘 | 恢复文件、Skill、Plan、Delta |
+| Overflow Recovery | 上下文爆掉时，先做 collapse drain，再做 reactive compact |
+| Output Recovery | 输出撞上 token 上限时，先尝试扩容，再注入“从中断处继续”的恢复消息 |
+| Model Fallback | 主模型临时不可用时，切到 fallback model 并重试当前请求 |
+| Resume | 进程结束、会话切换或远程任务中断后，从 transcript 和状态重新建场 |
+| Post-Compact Restoration | 压缩后补回文件、Skill、Plan、动态声明等继续工作所需状态 |
+| Agent Resume | 后台子 Agent 依靠 sidechain transcript 和 metadata 继续跑 |
+| UX Recovery | 用户在模型真正响应前取消时，自动回填刚才那条 prompt，避免输入白丢 |
+
+这几类机制分别补的是系统不同位置的断点。
+
+##### 1. 请求还没完成，就先自救
+
+在 `query.ts` 里，`prompt-too-long` 并不是立刻终止。
+
+它的恢复顺序是：
+
+```text
+413 / context overflow
+  -> 先尝试 drain staged context collapses
+  -> 不够，再走 reactive compact
+  -> 仍失败，才把错误真正暴露给用户
+```
+
+这说明 Claude Code 的恢复策略不是“失败后再问用户怎么办”，而是优先在运行时内部尝试低损耗恢复，尽量保住当前任务连续性。
+
+输出截断也是同一个思路：
+
+```text
+max_output_tokens
+  -> 先把单次输出上限从默认档位抬高
+  -> 仍撞顶，再注入恢复消息：
+     “直接从中断处继续，不要道歉，不要 recap”
+```
+
+这里的工程启发很直接：
+**长任务系统不能只会报错，还要知道怎样“接着上一次未完成的地方继续”。**
+
+##### 2. 模型层也要有故障转移
+
+Claude Code 会捕获 `FallbackTriggeredError`，切换到备用模型后重试当前请求。
+
+为了让 fallback 真正可用，它还会：
+
+- 清理失败尝试遗留的 assistant / tool result 状态；
+- 重新构造 streaming executor；
+- 更新 `mainLoopModel`；
+- 去掉不兼容的 thinking signature blocks；
+- 向用户给出“已切换模型”的 warning。
+
+这不是“换个模型再说”这么简单，而是保证：
+
+```text
+请求能重放；
+状态不串；
+历史不脏；
+用户知道发生了什么。
+```
+
+##### 3. 压缩不是结束，压缩后还要补现场
+
+前面讲过 compact，但 6.5 更值得强调的是：
+**Claude Code 把“压缩后恢复继续工作能力”也当成系统职责。**
+
+源码里会在 compact 后选择性补回：
+
+- 最近读过的文件内容；
+- 当前 plan；
+- 已调用过的 Skill；
+- 继续运行所需的动态声明。
+
+而且这些恢复是有预算的：
+
+- 最近文件按时间排序；
+- 文件数有限；
+- 单文件有 token 限额；
+- Skill 也按最近性和预算恢复。
+
+这说明恢复不是“把旧东西全塞回来”，而是：
+
+```text
+只恢复继续工作真正需要的最小状态。
+```
+
+##### 4. Resume 要恢复的不只是 messages
+
+会话恢复也不是简单加载 transcript。
+
+REPL 的 resume 逻辑会一起恢复：
+
+- 消息链；
+- SessionStart hooks；
+- plan 文件；
+- file history 和 attribution；
+- agent setting；
+- standalone agent context；
+- readFileState；
+- cost state；
+- worktree；
+- remote agent tasks；
+- content replacement state。
+
+换句话说，Claude Code 的 Resume 恢复的是：
+
+```text
+一个可继续工作的会话运行环境，
+而不是一串历史文本。
+```
+
+这也是它比“普通聊天记录恢复”更像 runtime 的地方。
+
+##### 5. 子 Agent 也进入恢复体系
+
+后台子 Agent 不只是跑完就算。
+
+`resumeAgent` 会读取：
+
+- sidechain transcript；
+- agent metadata；
+- 原来的 worktree 信息；
+- replacement state；
+- fork agent 对应的父级 system prompt。
+
+然后重新注册异步任务，再把它接回运行态。
+
+这意味着 Claude Code 的“任务连续性”不是只照顾主 Agent，而是把被派生出去的执行单元也纳入恢复系统。
+
+##### 6. 连用户手感都算进恢复
+
+REPL 里还有一个很细但很高级的恢复动作：
+
+如果用户在模型还没真正给出有效响应前取消，系统会自动把刚才那条 prompt 重新放回输入区，避免用户重打一遍。
+
+这类设计不改变推理质量，却显著提升长任务体验。
+它说明“Recovery”不只是后端容错，也包括交互状态的温和收口。
 
 ### 工程启发
 
-扩展和可靠性其实是一组问题：
+Claude Code 给我们的启发，不是“长任务要多加几个 retry”，而是长任务系统需要同时具备三种恢复能力：
 
 ```text
-能力越多，越需要按需加载；
-任务越长，越需要可恢复状态。
+运行中恢复：请求失败时，系统自己先续上；
+压缩后恢复：历史缩短后，关键状态还能补回来；
+中断后恢复：进程、会话、子任务都能重新接回去。
 ```
 
-Claude Code 的策略是：能力扩展轻量发现、按需加载；长任务通过压缩、恢复、resume、fallback 保持连续。
+这套设计真正完善的是整个 Agent Runtime 的“持续工作能力”：
+
+- 错误不是立刻终点，而是先进入恢复链路；
+- 上下文不是只会裁剪，还会补关键状态；
+- 会话不是一次性进程，而是可切换、可恢复的运行单元；
+- 子 Agent 不是临时线程，而是能被续跑的任务实体；
+- 用户感知的失败，也尽量被平滑收束。
+
+所以 `Recovery / Resume / Fallback` 的价值，不只是让系统“更稳”，而是让一个 Agent 真正具备：
+
+```text
+长时间工作，
+中途受挫，
+还能继续完成任务。
+```
 
 ---
 
@@ -1692,6 +1996,8 @@ Claude Code 的策略是：能力扩展轻量发现、按需加载；长任务�
 11. Recovery / Resume / Fallback 处理异常和长任务断点。
     prompt-too-long、输出截断、模型错误、hook 阻断、会话中断、压缩后遗忘，都会进入对应恢复路径。
 ```
+
+还有一类更轻量的信号，不直接改变这条主链路，而是服务于交互质量观测。源码里会识别部分明显表达不满、挫败或辱骂意味的用户输入，并把 `is_negative` 记入埋点；内部 dogfooding 分支还预留了 frustration detection 入口，用来触发反馈或 transcript sharing 提示。就当前可见实现而言，它更像质量分析和失败样本收集机制，而不是一个会实时切换回复策略的“情绪管理层”。
 
 换成“输入 / 处理 / 输出”的视角，可以看得更清楚：
 
