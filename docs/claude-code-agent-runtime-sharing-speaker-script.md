@@ -81,7 +81,7 @@ user input
 
 ---
 
-## 1. 先讲整体架构图
+##  先讲整体架构图
 
 我们先看整体架构，不急着进源码。
 
@@ -152,7 +152,7 @@ tool_use 进入运行时执行，结果再回填给模型；
 
 ---
 
-## 2. 任务是怎么被推进的
+## 1. 任务是怎么被推进的
 
 接下来讲第一层：任务推进。
 
@@ -228,7 +228,7 @@ queryLoop 是任务推进的状态机。
 
 ---
 
-## 3. 模型行为是怎么被约束的
+## 2. 模型行为是怎么被约束的
 
 第二层是模型行为约束。
 
@@ -315,7 +315,7 @@ Prompt 不是安全边界，但它是降低模型决策噪声的第一层控制�
 
 ---
 
-## 4. 模型每轮基于什么工作
+## 3. 模型每轮基于什么工作
 
 第三层是上下文、记忆、压缩和缓存。
 
@@ -330,7 +330,7 @@ Prompt 不是安全边界，但它是降低模型决策噪声的第一层控制�
 
 Claude Code 不把上下文看成一个简单的 messages 数组，而是把它拆成不同寿命、不同用途的状态。
 
-我们先讲 Context。
+我们先讲 Context。对应 3.1 
 
 Context 解决的是：
 
@@ -423,11 +423,11 @@ MCP、Agent、延迟工具等动态声明。
 
 ```text
 旧历史
-  -> compact summary
-  -> file attachments
-  -> invoked skill attachment
-  -> plan attachments
-  -> runtime delta attachments
+  -> compact summary              // 保留任务主线
+  -> post-compact file attachments // 补回关键文件现场
+  -> invoked skill attachment      // 补回已加载的专业指令
+  -> plan / plan mode attachments  // 补回计划状态
+  -> delta attachments             // 补回工具、Agent、MCP 等动态声明
 ```
 
 最后是 Prompt Cache。
@@ -445,7 +445,7 @@ Prompt Cache 的核心是稳定前缀。Claude Code 会尽量把稳定 system pr
 
 ---
 
-## 5. 工具调用如何被接住
+## 4. 工具调用如何被接住
 
 第四层是工具调用。
 
@@ -530,7 +530,7 @@ Claude Code 会按每个工具的 `isConcurrencySafe` 把工具调用分批：
 
 ---
 
-## 6. 安全不是一个模块
+## 5. 安全不是一个模块
 
 第五层是安全。
 
@@ -580,6 +580,7 @@ Permission 和 Hooks 可以阻止危险动作。
 
 Sandbox 则限制真正执行时的影响范围。
 
+ 5.1 Prompt Injection
 所以 Prompt Injection 不是某个函数能解决的问题。它是一条横切链路：
 
 ```text
@@ -595,6 +596,8 @@ Sandbox 则限制真正执行时的影响范围。
 
 任何一层把“外部数据”和“有效指令”混在一起，都可能放大风险。
 
+#### 5.3 Context 层：外部内容需要边界
+
 这里尤其要强调 Context 层。
 
 外部内容进入模型上下文时，应该保留来源、角色、边界、新鲜度和信任级别。
@@ -609,7 +612,7 @@ Sandbox 则限制真正执行时的影响范围。
 但它属于外部数据，不是上级指令。
 ```
 
-这一章可以这样收束：
+### 工程启发
 
 ```text
 Prompt 和 Context 降低模型误判概率；
@@ -620,7 +623,7 @@ Tool、Permission、Hooks、Sandbox 决定动作能不能落地。
 
 ---
 
-## 7. 长任务和复杂能力怎么支撑
+## 6. 长任务和复杂能力怎么支撑
 
 第六层是扩展能力和长任务可靠性。
 
@@ -648,10 +651,12 @@ Multi-Agent。
 Recovery；
 Resume；
 Fallback；
-Post-Compact Restoration。
+Compact Restoration。
 ```
 
-先讲 Skill。
+#### 6.1 Skill：专业指令按需进入
+
+#### 先讲 Skill。
 
 Skill 解决的是：
 
@@ -671,7 +676,9 @@ Skill 解决的是：
 
 而且 Skill 和压缩恢复有关。某个 Skill 一旦被调用，它往往改变了后续任务的方法。如果后来发生 compact，旧消息被压掉，Claude Code 会通过 `invokedSkills` 选择性恢复这些专业规则。
 
-再讲 Plugin。
+#### 6.2 Plugin：把外部能力包展开为运行时能力
+
+#### 再讲 Plugin。
 
 Plugin 不是一个单独的运行时，而是一个能力包。它可以包含 commands、skills、agents、hooks、MCP 配置。Claude Code 会把插件拆成自己已经认识的内部组件，再接入当前会话。
 
@@ -731,9 +738,9 @@ Multi-Agent 的工程价值不是“让系统显得更聪明”，而是给复�
 切出去以后怎样带回最有价值的结果。
 ```
 
-最后讲长任务可靠性。
+#### 6.5 Recovery / Resume / Fallback：长任务不断线
 
-Claude Code 对长任务的理解不是“尽量别失败”，而是：
+最后讲长任务的可靠性：Claude Code 对长任务的理解不是“尽量别失败”，而是：
 
 ```text
 失败会发生；
@@ -742,17 +749,27 @@ Claude Code 对长任务的理解不是“尽量别失败”，而是：
 
 所以它有一组恢复机制。
 
-prompt 太长时，不是立刻终止，而是先尝试 context collapse drain，再 reactive compact。
+1. ##### 请求还没完成，就先自救
+
+prompt 太长时，不是立刻终止，而是先尝试 context collapse ，再 reactive compact。
 
 输出截断时，不是让用户重新问，而是先尝试提高输出上限，再注入“从中断处继续”的恢复消息。
 
+1. ##### 模型层也要有故障转移
+
 主模型不可用时，会切 fallback model，并清理失败尝试遗留的 assistant / tool result 状态。
+
+1. ##### Resume 要恢复的不只是 messages
 
 会话恢复时，也不是只加载 messages，而是恢复 plan、file history、readFileState、cost state、worktree、remote agent tasks、content replacement state 等运行环境。
 
+1. ##### 子 Agent 也进入恢复体系
+
 子 Agent 也不是临时线程，它有 sidechain transcript 和 metadata，可以被 resume。
 
-这一章的结论是：
+### 工程启发
+
+### 这一章的结论是：
 
 ```text
 长任务系统不能只会 retry；
