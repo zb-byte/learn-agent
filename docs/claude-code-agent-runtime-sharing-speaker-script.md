@@ -105,10 +105,10 @@ query loop 每一轮都会做几件事：
 `no tool_use` 之后还要判断：
 
 ```text
-有没有prompt-too-long 错误；
-有没有 max_output_tokens 截断需要恢复；
-Stop Hook 是否阻止继续；
-Token Budget 是否要求继续；
+1、有没有prompt-too-long 错误；
+2、有没有 max_tokens 被模型截断，需要恢复的；
+3、Stop Hook 是否阻止继续；（返回给用户之前，检查输出是否符合要求，比如代码审查 Hook、安全检查 Hook、格式检查 Hook等等 ）
+4、Token Budget 是否要求继续；（鼓励模型在预算内尽量完成任务，防止模型过早停止（还有预算，继续做），防止模型过度使用（预算用完，该停了））
 最终结果是否可以算成功。
 ```
 
