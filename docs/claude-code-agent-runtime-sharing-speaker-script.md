@@ -204,7 +204,7 @@ API 返回 prompt-too-long
 
 ---
 
-### 核心实现：显式命名每次继续和结束
+### 核心实现：显式命名 继续 OR 结束
 
 `queryLoop()` 内部维护跨迭代状态，包含：
 
@@ -287,14 +287,14 @@ Claude Code 的 Prompt Engineering 主要有三层：
 
 ### 第一层：系统提示词分段
 
-Claude Code 把系统提示词拆成多段，这里有两条不同的轴：
+Claude Code 把系统提示词拆成多段，这里做了两个事情：
 
-**第一条轴：section 的计算策略**
+**第一：section 的计算策略**
 
 - 普通 `systemPromptSection`：会话内计算后缓存
 - `DANGEROUS_uncachedSystemPromptSection`：每轮重新计算（如 MCP instructions）
 
-**第二条轴：prompt cache 的边界策略**
+**第二：prompt cache 的边界策略**
 
 - `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 之前：稳定系统提示词前缀
 - `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 之后：用户、会话、环境、扩展相关内容
@@ -325,7 +325,7 @@ Claude Code 把系统提示词拆成多段，这里有两条不同的轴：
 ]
 ```
 
-动态段落包括：session_guidance、memory、env_info_simple、language、mcp_instructions 等。
+动态段落包括：会话级提示、memory、环境信息、风格配置、mcp_instructions（因为MCP 连接是动态的） 等。
 
 边界前的稳定内容标记为 `cacheScope: global`，边界后的会话内容不加 cache_control。
 
@@ -333,7 +333,7 @@ Claude Code 把系统提示词拆成多段，这里有两条不同的轴：
 
 ### 第二层：行为指令模式
 
-Claude Code 的行为指令不是散落在 prompt 里的”写作建议”，而是**提前压制模型常见的错误倾向**。
+Claude Code 的行为指令不是散落在 prompt 里的”写作建议”，而是**提前纠正模型常见的错误倾向**。
 
 模型在工程任务里最容易出问题的地方：
 
