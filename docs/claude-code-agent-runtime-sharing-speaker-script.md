@@ -1,4 +1,4 @@
-# Claude Code Agent Runtime 分享者讲稿
+# Claude Code Agent Runtime 讲稿
 
 > 讲者专用版。本文不是发给听众的阅读稿，而是方便分享者现场照读、控节奏、做转场的口播稿。
 
@@ -504,7 +504,7 @@ Claude Code 不会把完整历史原样塞给模型。进入模型前，它会�
 
 - 旧压缩边界之前的内容不再重复进入
 - 超大的工具结果先被预算裁剪或替换
-- 旧历史可以被 snip 或 microcompact 轻量清理
+- 旧历史可以被 废弃 或  轻量清理
 - context collapse 可以把部分历史投影成折叠视图
 - autocompact 在上下文压力很高时生成摘要并替换旧消息
 - system context 被追加到 system prompt
@@ -1252,8 +1252,6 @@ Recovery / Resume / Fallback 处理异常和长任务断点
 
 最后做个总结。
 
-今天我们看的不是”模型加工具”的简单系统，而是围绕 Agent Loop 组织起来的运行时。
-
 几个设计重点：
 
 **第一，任务推进要显式建模**
@@ -1303,61 +1301,4 @@ Agent 的能力，不只来自模型
 
 ### 进一步阅读
 
-如果大家后面继续看源码，建议按这个顺序：
-
-```text
-先看 queryLoop，理解任务推进
-再看 system prompt 和 tool prompt，理解模型行为约束
-再看 context、memory、compact，理解运行现场
-再看 tools、permission、hooks，理解工具治理
-最后看 skill、plugin、multi-agent、resume，理解长任务和扩展
-```
-
-这样读会比较顺，不容易被局部实现细节带散。
-
-我的分享就到这里，谢谢大家。
-
----
-
-## 备用：5 分钟短版
-
-如果现场时间突然被压缩，可以只讲这一版。
-
-今天这份分享的核心观点是：Claude Code 不是一个模型调用器，而是一个围绕 Agent Loop 构建的任务运行时。
-
-它最重要的能力不是“能调用多少工具”，而是能让一个 Agent 长时间、可恢复、可约束地工作。
-
-主链路是：
-
-```text
-用户输入
-  -> 会话编排
-  -> queryLoop
-  -> 上下文整理
-  -> 模型决策
-  -> 工具执行
-  -> tool_result 回填
-  -> 继续、恢复或结束判断
-```
-
-这里有几个关键点。
-
-第一，`queryLoop` 是状态机，不是简单 while 循环。每次继续都有 reason，每次结束也有 reason。
-
-第二，Prompt 只负责影响模型选择，不负责最终安全。真正的动作落地要经过 Tool、Permission、Hooks 和 Sandbox。
-
-第三，Context 不是 messages 拼接，而是运行现场。Claude Code 会管理 messages、FileStateCache、transcript、compact summary、invoked skills、prompt cache 等不同寿命的状态。
-
-第四，模型返回 `tool_use` 之后，运行时要做 schema 校验、语义校验、并发分区、权限判断、hooks、执行、结果预算和回填。
-
-第五，没有 `tool_use` 也不是直接结束。系统还要检查 prompt-too-long、max_output_tokens、stop hooks、token budget 和最终成功性，全部通过才是 completed。
-
-第六，长任务靠 Recovery / Resume / Fallback 支撑：上下文爆了要压缩，输出截断要续写，模型不可用要 fallback，会话中断要 resume，子 Agent 也要能恢复。
-
-所以 Claude Code 给我们的工程启发是：
-
-```text
-模型负责判断下一步；
-运行时负责让每一步可执行、可约束、可恢复、可解释。
-```
-
+如果大家后面继续看源码详细解读 可以看以下文档，我的分享就到这里，谢谢大家。
