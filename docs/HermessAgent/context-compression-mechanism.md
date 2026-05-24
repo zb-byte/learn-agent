@@ -1,26 +1,39 @@
-# Context Compression 机制深度解析
+# Context Compression 机制架构设计
 
 ## 概述
 
 Context Compression（上下文压缩）是 Hermes Agent 应对长对话的核心机制。当对话历史超过模型上下文窗口的阈值时，自动将中间的对话回合压缩成结构化摘要，保留头部和尾部的完整上下文，确保对话可以无限延续。
 
-## 核心设计理念
+## 核心设计原则
 
-- **自动触发**：基于 token 数量自动判断是否需要压缩
-- **保护关键上下文**：头部（系统提示 + 初始交互）和尾部（最近的对话）完整保留
-- **结构化摘要**：使用辅助模型生成结构化的中间回合摘要
-- **迭代更新**：后续压缩会更新之前的摘要，而非从头开始
-- **工具对完整性**：确保 tool_call 和 tool_result 配对完整
+### 自动触发
+基于 token 数量自动判断是否需要压缩，无需用户干预。
+
+### 保护关键上下文
+头部（系统提示 + 初始交互）和尾部（最近的对话）完整保留，只压缩中间的历史回合。
+
+### 结构化摘要
+使用辅助模型生成结构化的中间回合摘要，保留关键信息和上下文。
+
+### 迭代更新
+后续压缩会更新之前的摘要，而非从头开始，避免信息丢失。
+
+### 工具对完整性
+确保 tool_call 和 tool_result 配对完整，防止 API 错误。
 
 ---
 
-## 系统组件
+## 架构组成
 
-### 1. ContextCompressor（压缩器）
+整个机制由 6 个核心组件构成，协同完成上下文压缩。
+
+### 组件 1：ContextCompressor（压缩器）
+
+压缩器是整个机制的核心控制器，负责判断、执行和管理压缩流程。
 
 **位置**：`agent/context_compressor.py`
 
-**职责**：
+**核心职责**：
 - 判断是否需要压缩（`should_compress`）
 - 执行压缩算法（`compress`）
 - 管理压缩状态和历史摘要
@@ -41,7 +54,11 @@ class ContextCompressor:
     _previous_summary: str        # 上次压缩的摘要（用于迭代更新）
 ```
 
-### 2. 触发检查器（Trigger Checker）
+---
+
+### 组件 2：触发检查器（Trigger Checker）
+
+触发检查器负责判断当前对话是否需要压缩。
 
 **位置**：`agent/context_compressor.py:should_compress`
 
@@ -74,9 +91,14 @@ threshold_tokens = max(
 - 200K 上下文窗口 × 50% = 100K tokens 触发
 - 32K 上下文窗口 × 50% = 16K tokens，但最低 64K，所以不会触发
 
-### 3. 边界保护器（Boundary Protector）
+**反抖动保护**：
+- 连续 2 次压缩效果 <10% 时，停止自动压缩
+- 防止陷入无限压缩循环
+- 用户可通过 `/new` 或 `/compress` 手动处理
 
-**职责**：确定哪些消息需要保护，哪些可以压缩
+### 组件 3：边界保护器（Boundary Protector）
+
+边界保护器负责确定哪些消息需要保护，哪些可以压缩。
 
 #### 头部保护（Head Protection）
 
@@ -94,7 +116,7 @@ def _protect_head_size(self, messages: List[Dict]) -> int:
 - 系统提示（总是保护）
 - 前 N 条非系统消息（默认 3 条）
 
-**为什么保护头部**：
+**保护原因**：
 - 系统提示包含工具定义、memory、技能等核心上下文
 - 初始交互通常包含任务目标和约束
 
@@ -134,18 +156,20 @@ def _find_tail_cut_by_tokens(self, messages, head_end, token_budget=None):
 - 最后一条用户消息（必须保护，防止任务丢失）
 - 至少 3 条消息（硬性最小值）
 
-**为什么基于 token 而非消息数**：
+**设计优势**：
 - 消息长度差异巨大（一条 terminal 输出可能 10K tokens）
 - Token 预算更精确地控制压缩后的大小
 - 自动适应不同上下文窗口的模型
 
-### 4. 工具对完整性保护器（Tool Pair Sanitizer）
+### 组件 4：工具对完整性保护器（Tool Pair Sanitizer）
+
+工具对完整性保护器负责确保压缩后的消息列表中，tool_call 和 tool_result 保持配对完整。
 
 **位置**：`agent/context_compressor.py:_sanitize_tool_pairs`
 
-**问题**：压缩可能破坏 tool_call 和 tool_result 的配对
+**问题场景**：压缩可能破坏 tool_call 和 tool_result 的配对
 
-**场景 1**：孤儿 tool_result
+#### 场景 1：孤儿 tool_result
 ```
 [HEAD]
 assistant: tool_calls=[{id: "call_123", name: "read_file"}]  ← 被压缩掉
@@ -153,7 +177,7 @@ tool: tool_call_id="call_123", content="..."                 ← 孤儿！
 [TAIL]
 ```
 
-**场景 2**：孤儿 tool_call
+#### 场景 2：孤儿 tool_call
 ```
 [HEAD]
 assistant: tool_calls=[{id: "call_456", name: "terminal"}]   ← 保留
@@ -188,7 +212,14 @@ def _sanitize_tool_pairs(self, messages):
     return messages
 ```
 
-### 5. 摘要生成器（Summary Generator）
+**保护效果**：
+- 移除无法匹配的 tool_result（避免 API 错误）
+- 为未匹配的 tool_call 插入占位 result（保持对话流完整）
+- 确保 API 兼容性
+
+### 组件 5：摘要生成器（Summary Generator）
+
+摘要生成器负责将中间回合压缩成结构化的摘要。
 
 **位置**：`agent/context_compressor.py:_generate_summary`
 
@@ -241,7 +272,7 @@ def _sanitize_tool_pairs(self, messages):
 [关键值、错误消息、配置细节]
 ```
 
-**迭代更新**：
+**迭代更新机制**：
 ```python
 if self._previous_summary:
     # 有旧摘要 → 迭代更新
@@ -276,13 +307,22 @@ def _compute_summary_budget(self, turns_to_summarize):
     return max(2000, min(budget, 12000))  # 2K-12K tokens
 ```
 
-### 6. 工具输出修剪器（Tool Output Pruner）
+**设计优势**：
+- 结构化便于模型理解和提取信息
+- 迭代更新避免信息丢失
+- 动态预算适应不同长度的压缩内容
+
+---
+
+### 组件 6：工具输出修剪器（Tool Output Pruner）
+
+工具输出修剪器在 LLM 摘要之前，先用廉价的规则修剪旧工具输出。
 
 **位置**：`agent/context_compressor.py:_prune_old_tool_results`
 
-**目的**：在 LLM 摘要之前，先用廉价的规则修剪旧工具输出
+**目的**：在 LLM 摘要之前，先用廉价的规则修剪旧工具输出，减少摘要模型的输入量。
 
-**策略**：
+**修剪策略**：
 ```python
 def _prune_old_tool_results(self, messages, protect_tail_count, protect_tail_tokens):
     # Pass 1: 去重相同的工具结果
@@ -320,11 +360,17 @@ def _prune_old_tool_results(self, messages, protect_tail_count, protect_tail_tok
 "[terminal] ran `pytest tests/` -> exit 0, 47 lines output"
 ```
 
+**修剪收益**：
+- 无 API 成本
+- 可节省 20-40% 的 tokens
+- 保留关键信息（命令、文件路径、退出码）
+- 减少摘要模型的输入量
+
 ---
 
 ## 压缩流程
 
-### 完整流程图
+### 完整执行流程
 
 ```
 用户消息 → API 调用
@@ -396,12 +442,15 @@ else:
     _real_tokens = estimate_request_tokens_rough(messages, tools=agent.tools)
 ```
 
-**为什么只用 prompt_tokens**：
+**设计原因**：
+- 只有 `prompt_tokens` 占用上下文窗口
 - `completion_tokens` 不占用上下文窗口
 - 思考模型（DeepSeek R1、QwQ）的 reasoning tokens 会虚高
 - 只有 prompt 部分才会累积导致上下文溢出
 
 ### 压缩策略
+
+系统采用三层压缩策略，从廉价到昂贵逐层执行。
 
 #### 策略 1：工具输出修剪（Cheap Pre-pass）
 
@@ -444,6 +493,145 @@ else:
 - 避免信息丢失
 - 摘要质量随时间提升
 - 减少摘要模型的输入
+
+---
+
+## 关键设计决策
+
+### 为什么保护尾部用 token 预算而非消息数？
+
+**问题**：消息长度差异巨大
+
+```
+消息 1: "好的" (2 tokens)
+消息 2: terminal 输出 (15K tokens)
+消息 3: read_file 结果 (8K tokens)
+```
+
+如果固定保护 20 条消息：
+- 可能只保护了 5K tokens（20 条短消息）
+- 也可能保护了 200K tokens（20 条长消息）
+
+**解决方案**：基于 token 预算
+
+```python
+tail_token_budget = threshold_tokens * summary_target_ratio
+# 例如：100K 阈值 × 0.20 = 20K tokens 尾部预算
+```
+
+**收益**：
+- 压缩后大小可预测
+- 自动适应不同模型的上下文窗口
+- 避免过度保护或保护不足
+
+### 为什么要确保最后一条用户消息在尾部？
+
+**问题**：`_align_boundary_backward` 可能把用户消息推到中间
+
+**场景**：
+```
+[HEAD]
+...
+user: "现在重构 auth 模块改用 JWT"          ← 最后的用户消息
+assistant: tool_calls=[read_file, ...]
+tool: result 1
+tool: result 2
+tool: result 3                              ← 边界对齐到这里
+[TAIL]
+assistant: "好的，我来..."
+```
+
+**后果**：
+- 用户消息被压缩到摘要的 "Pending User Asks"
+- 但 `SUMMARY_PREFIX` 说"只响应摘要之后的消息"
+- 模型看不到活跃任务，陷入停滞或重复已完成的工作
+
+**解决方案**：
+```python
+def _ensure_last_user_message_in_tail(self, messages, cut_idx, head_end):
+    last_user_idx = self._find_last_user_message_idx(messages, head_end)
+    if last_user_idx >= cut_idx:
+        return cut_idx  # 已在尾部
+    
+    # 拉回边界，确保用户消息在尾部
+    return max(last_user_idx, head_end + 1)
+```
+
+**参考**：Issue #10896
+
+### 为什么要迭代更新摘要而非每次从头生成？
+
+**问题**：多次压缩会丢失信息
+
+**场景**：
+```
+第 1 次压缩：回合 1-100 → 摘要 A
+第 2 次压缩：回合 1-200 → 摘要 B（重新摘要 1-100，可能丢失 A 中的细节）
+第 3 次压缩：回合 1-300 → 摘要 C（重新摘要 1-200，可能丢失 B 中的细节）
+```
+
+**解决方案**：迭代更新
+
+```
+第 1 次压缩：回合 1-100 → 摘要 A
+第 2 次压缩：摘要 A + 回合 101-200 → 摘要 B（保留 A，添加新内容）
+第 3 次压缩：摘要 B + 回合 201-300 → 摘要 C（保留 B，添加新内容）
+```
+
+**收益**：
+- 信息累积而非丢失
+- 摘要质量随时间提升
+- 减少摘要模型的输入量
+
+### 为什么要修剪工具输出而非直接摘要？
+
+**对比**：
+
+**方案 A：直接 LLM 摘要**
+```
+成本：每次压缩调用 LLM
+时间：2-5 秒
+效果：高质量摘要
+```
+
+**方案 B：规则修剪 + LLM 摘要**
+```
+成本：规则修剪免费，LLM 只处理剩余部分
+时间：规则修剪 <100ms，LLM 1-3 秒
+效果：规则修剪 20-40%，LLM 再压缩 50-70%
+```
+
+**选择**：方案 B（两阶段）
+
+**原因**：
+- 工具输出有明确的模式（命令、文件路径、退出码）
+- 规则可以提取关键信息，丢弃冗余输出
+- 减少 LLM 输入，降低成本和延迟
+- 保留的信息更精确（不会被 LLM 改写）
+
+### 为什么要去重工具结果？
+
+**场景**：反复读取同一个文件
+
+```
+回合 10: read_file("config.py") → 3000 chars
+回合 25: read_file("config.py") → 3000 chars（内容相同）
+回合 40: read_file("config.py") → 3000 chars（内容相同）
+```
+
+**不去重**：9000 chars 占用上下文
+
+**去重后**：
+```
+回合 10: read_file("config.py") → 3000 chars（保留）
+回合 25: "[Duplicate tool output — same as recent call]"
+回合 40: "[Duplicate tool output — same as recent call]"
+```
+
+**收益**：
+- 节省 6000 chars
+- 保留最新的完整副本
+- 模型仍然知道"读取了多次"
 
 ---
 
@@ -521,7 +709,7 @@ export HERMES_COMPRESSION_USE_MAIN_MODEL=1
 
 ### 压缩比示例
 
-**场景 1：工具密集型对话**
+#### 场景 1：工具密集型对话
 ```
 压缩前：150 条消息，~120K tokens
   ├─ 头部：4 条消息（系统提示 + 3 条）
@@ -536,7 +724,7 @@ export HERMES_COMPRESSION_USE_MAIN_MODEL=1
 节省：~85K tokens（71%）
 ```
 
-**场景 2：对话密集型**
+#### 场景 2：对话密集型
 ```
 压缩前：80 条消息，~95K tokens
   ├─ 头部：4 条消息
@@ -553,9 +741,8 @@ export HERMES_COMPRESSION_USE_MAIN_MODEL=1
 
 ### 反抖动保护
 
-**问题**：压缩效果不佳时，可能陷入无限循环
+**问题场景**：压缩效果不佳时，可能陷入无限循环
 
-**场景**：
 ```
 第 1 次压缩：120K → 110K（节省 8%）
 第 2 次压缩：110K → 105K（节省 5%）
@@ -576,150 +763,11 @@ if self._ineffective_compression_count >= 2:
 
 ---
 
-## 关键设计决策
-
-### 1. 为什么保护尾部用 token 预算而非消息数？
-
-**问题**：消息长度差异巨大
-
-```
-消息 1: "好的" (2 tokens)
-消息 2: terminal 输出 (15K tokens)
-消息 3: read_file 结果 (8K tokens)
-```
-
-如果固定保护 20 条消息：
-- 可能只保护了 5K tokens（20 条短消息）
-- 也可能保护了 200K tokens（20 条长消息）
-
-**解决方案**：基于 token 预算
-
-```python
-tail_token_budget = threshold_tokens * summary_target_ratio
-# 例如：100K 阈值 × 0.20 = 20K tokens 尾部预算
-```
-
-**收益**：
-- 压缩后大小可预测
-- 自动适应不同模型的上下文窗口
-- 避免过度保护或保护不足
-
-### 2. 为什么要确保最后一条用户消息在尾部？
-
-**问题**：`_align_boundary_backward` 可能把用户消息推到中间
-
-**场景**：
-```
-[HEAD]
-...
-user: "现在重构 auth 模块改用 JWT"          ← 最后的用户消息
-assistant: tool_calls=[read_file, ...]
-tool: result 1
-tool: result 2
-tool: result 3                              ← 边界对齐到这里
-[TAIL]
-assistant: "好的，我来..."
-```
-
-**后果**：
-- 用户消息被压缩到摘要的 "Pending User Asks"
-- 但 `SUMMARY_PREFIX` 说"只响应摘要之后的消息"
-- 模型看不到活跃任务，陷入停滞或重复已完成的工作
-
-**解决方案**：
-```python
-def _ensure_last_user_message_in_tail(self, messages, cut_idx, head_end):
-    last_user_idx = self._find_last_user_message_idx(messages, head_end)
-    if last_user_idx >= cut_idx:
-        return cut_idx  # 已在尾部
-    
-    # 拉回边界，确保用户消息在尾部
-    return max(last_user_idx, head_end + 1)
-```
-
-**参考**：Issue #10896
-
-### 3. 为什么要迭代更新摘要而非每次从头生成？
-
-**问题**：多次压缩会丢失信息
-
-**场景**：
-```
-第 1 次压缩：回合 1-100 → 摘要 A
-第 2 次压缩：回合 1-200 → 摘要 B（重新摘要 1-100，可能丢失 A 中的细节）
-第 3 次压缩：回合 1-300 → 摘要 C（重新摘要 1-200，可能丢失 B 中的细节）
-```
-
-**解决方案**：迭代更新
-
-```
-第 1 次压缩：回合 1-100 → 摘要 A
-第 2 次压缩：摘要 A + 回合 101-200 → 摘要 B（保留 A，添加新内容）
-第 3 次压缩：摘要 B + 回合 201-300 → 摘要 C（保留 B，添加新内容）
-```
-
-**收益**：
-- 信息累积而非丢失
-- 摘要质量随时间提升
-- 减少摘要模型的输入量
-
-### 4. 为什么要修剪工具输出而非直接摘要？
-
-**对比**：
-
-**方案 A：直接 LLM 摘要**
-```
-成本：每次压缩调用 LLM
-时间：2-5 秒
-效果：高质量摘要
-```
-
-**方案 B：规则修剪 + LLM 摘要**
-```
-成本：规则修剪免费，LLM 只处理剩余部分
-时间：规则修剪 <100ms，LLM 1-3 秒
-效果：规则修剪 20-40%，LLM 再压缩 50-70%
-```
-
-**选择**：方案 B（两阶段）
-
-**原因**：
-- 工具输出有明确的模式（命令、文件路径、退出码）
-- 规则可以提取关键信息，丢弃冗余输出
-- 减少 LLM 输入，降低成本和延迟
-- 保留的信息更精确（不会被 LLM 改写）
-
-### 5. 为什么要去重工具结果？
-
-**场景**：反复读取同一个文件
-
-```
-回合 10: read_file("config.py") → 3000 chars
-回合 25: read_file("config.py") → 3000 chars（内容相同）
-回合 40: read_file("config.py") → 3000 chars（内容相同）
-```
-
-**不去重**：9000 chars 占用上下文
-
-**去重后**：
-```
-回合 10: read_file("config.py") → 3000 chars（保留）
-回合 25: "[Duplicate tool output — same as recent call]"
-回合 40: "[Duplicate tool output — same as recent call]"
-```
-
-**收益**：
-- 节省 6000 chars
-- 保留最新的完整副本
-- 模型仍然知道"读取了多次"
-
----
-
 ## 故障处理
 
-### 1. 摘要生成失败
+### 摘要生成失败
 
-**原因**：
+**失败原因**：
 - 辅助模型不可用（404、503）
 - 超时
 - 返回非 JSON 响应
@@ -739,7 +787,7 @@ if summary_model and summary_model != main_model:
         summary = call_llm(model=main_model, ...)
 ```
 
-**适用**：模型不可用、超时、非 JSON 响应
+**适用场景**：模型不可用、超时、非 JSON 响应
 
 #### 策略 B：冷却期
 
@@ -750,7 +798,7 @@ except Exception as e:
     return None
 ```
 
-**适用**：瞬态错误（网络、限流）
+**适用场景**：瞬态错误（网络、限流）
 
 #### 策略 C：中止压缩（可选）
 
@@ -763,7 +811,7 @@ if not summary and self.abort_on_summary_failure:
 
 **配置**：`compression.abort_on_summary_failure = true`
 
-**适用**：用户希望保留所有上下文，宁可冻结对话
+**适用场景**：用户希望保留所有上下文，宁可冻结对话
 
 #### 策略 D：静态占位符（默认）
 
@@ -777,9 +825,9 @@ if not summary:
     """
 ```
 
-**适用**：摘要失败但仍需释放空间
+**适用场景**：摘要失败但仍需释放空间
 
-### 2. 压缩效果不佳
+### 压缩效果不佳
 
 **症状**：
 ```
@@ -804,7 +852,7 @@ if self._ineffective_compression_count >= 2:
 - `/compress <topic>` - 聚焦压缩特定主题
 - 调整配置：降低 `target_ratio`，减少 `protect_first_n`
 
-### 3. 工具对不匹配
+### 工具对不匹配
 
 **症状**：API 返回错误
 
@@ -823,7 +871,7 @@ compressed = self._sanitize_tool_pairs(compressed)
 - 移除孤儿 tool_result
 - 为孤儿 tool_call 插入占位 result
 
-### 4. 上下文溢出
+### 上下文溢出
 
 **症状**：即使压缩后仍然超过上下文窗口
 
@@ -846,83 +894,9 @@ if classified.reason == FailoverReason.context_overflow:
 
 ---
 
-## 调试技巧
-
-### 1. 查看压缩日志
-
-```bash
-# 启用 verbose 模式
-export HERMES_VERBOSE=1
-
-# 查看压缩触发和效果
-tail -f ~/.hermes/agent.log | grep -E "compress|Context compression"
-```
-
-**示例输出**：
-```
-Context compression triggered (105234 tokens >= 100000 threshold)
-Model context limit: 200000 tokens (50% = 100000)
-Summarizing turns 5-145 (140 turns), protecting 4 head + 10 tail messages
-Pre-compression: pruned 23 old tool result(s)
-Compressed: 150 -> 15 messages (~85000 tokens saved, 71%)
-Compression #1 complete
-```
-
-### 2. 手动触发压缩
-
-```bash
-# CLI 中使用 /compress
-/compress
-
-# 聚焦压缩特定主题
-/compress authentication refactoring
-```
-
-### 3. 检查压缩状态
-
-```python
-# 在代码中
-compressor = agent.context_compressor
-print(f"Context length: {compressor.context_length}")
-print(f"Threshold: {compressor.threshold_tokens}")
-print(f"Last prompt tokens: {compressor.last_prompt_tokens}")
-print(f"Should compress: {compressor.should_compress()}")
-print(f"Compression count: {compressor.compression_count}")
-print(f"Ineffective count: {compressor._ineffective_compression_count}")
-```
-
-### 4. 禁用压缩（调试用）
-
-```toml
-# config.toml
-[compression]
-enabled = false
-```
-
-或
-
-```bash
-export HERMES_COMPRESSION_DISABLED=1
-```
-
-### 5. 查看摘要内容
-
-**位置**：压缩后的消息列表中
-
-```python
-for msg in messages:
-    if msg.get("role") in ["user", "assistant"]:
-        content = msg.get("content", "")
-        if content.startswith(SUMMARY_PREFIX):
-            print("=== SUMMARY ===")
-            print(content)
-```
-
----
-
 ## 性能优化
 
-### 1. 使用辅助模型
+### 使用辅助模型
 
 **配置**：
 ```toml
@@ -948,7 +922,7 @@ summary_model = "anthropic/claude-haiku-3.5"
 - 质量：良好（摘要任务足够）
 ```
 
-### 2. 工具输出修剪
+### 工具输出修剪
 
 **收益**：
 - 无 API 成本
@@ -962,7 +936,7 @@ summary_model = "anthropic/claude-haiku-3.5"
 摘要输入：75K tokens（而非 120K）
 ```
 
-### 3. 迭代摘要
+### 迭代摘要
 
 **收益**：
 - 减少摘要模型输入
@@ -978,6 +952,80 @@ summary_model = "anthropic/claude-haiku-3.5"
 - 输入：上次摘要（8K）+ 新回合 101-200（50K）= 58K tokens
 - 输出：更新摘要（10K tokens）
 - 节省输入：42K tokens
+```
+
+---
+
+## 调试技巧
+
+### 查看压缩日志
+
+```bash
+# 启用 verbose 模式
+export HERMES_VERBOSE=1
+
+# 查看压缩触发和效果
+tail -f ~/.hermes/agent.log | grep -E "compress|Context compression"
+```
+
+**示例输出**：
+```
+Context compression triggered (105234 tokens >= 100000 threshold)
+Model context limit: 200000 tokens (50% = 100000)
+Summarizing turns 5-145 (140 turns), protecting 4 head + 10 tail messages
+Pre-compression: pruned 23 old tool result(s)
+Compressed: 150 -> 15 messages (~85000 tokens saved, 71%)
+Compression #1 complete
+```
+
+### 手动触发压缩
+
+```bash
+# CLI 中使用 /compress
+/compress
+
+# 聚焦压缩特定主题
+/compress authentication refactoring
+```
+
+### 检查压缩状态
+
+```python
+# 在代码中
+compressor = agent.context_compressor
+print(f"Context length: {compressor.context_length}")
+print(f"Threshold: {compressor.threshold_tokens}")
+print(f"Last prompt tokens: {compressor.last_prompt_tokens}")
+print(f"Should compress: {compressor.should_compress()}")
+print(f"Compression count: {compressor.compression_count}")
+print(f"Ineffective count: {compressor._ineffective_compression_count}")
+```
+
+### 禁用压缩（调试用）
+
+```toml
+# config.toml
+[compression]
+enabled = false
+```
+
+或
+
+```bash
+export HERMES_COMPRESSION_DISABLED=1
+```
+
+### 查看摘要内容
+
+**位置**：压缩后的消息列表中
+
+```python
+for msg in messages:
+    if msg.get("role") in ["user", "assistant"]:
+        content = msg.get("content", "")
+        if content.startswith(SUMMARY_PREFIX):
+            print("=== SUMMARY ===")
+            print(content)
 ```
 
 ---

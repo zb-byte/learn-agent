@@ -1,21 +1,32 @@
-# Background Review 机制解析
+# Background Review 机制架构设计
 
 ## 概述
 
-Background Review 是 Hermes Agent 的自我改进循环（Self-Improvement Loop），在每次对话回合结束后，自动在后台评估是否需要保存 memory 或更新 skill。这个机制让 Agent 能够从每次交互中学习，持续优化自己的知识库和工作流程。
+Background Review 是 Hermes Agent 的自我改进循环（Self-Improvement Loop）。该机制在每次对话回合结束后，自动在后台评估是否需要保存 memory 或更新 skill，使 Agent 能够从每次交互中学习，持续优化知识库和工作流程。
 
-## 核心设计理念
+## 核心设计原则
 
-- **非阻塞**：在后台线程运行，不影响用户体验
-- **独立上下文**：Fork 一个新的 Agent 实例，使用独立的工具白名单
-- **缓存复用**：继承父 Agent 的系统提示缓存，降低 API 成本
-- **最佳努力**：失败不影响主流程，静默降级
+### 非阻塞执行
+Review 在后台线程运行，不影响用户体验。用户看到响应后，Review 才开始执行。
+
+### 隔离性保证
+Fork 一个新的 Agent 实例，使用独立的工具白名单（只允许 memory 和 skill_manage 工具），防止 Review 过程执行危险命令或影响主对话状态。
+
+### 缓存复用优化
+继承父 Agent 的系统提示缓存（`_cached_system_prompt`），命中 Anthropic 的 prefix cache，降低 API 成本约 26%。
+
+### 最佳努力原则
+失败不影响主流程，静默降级。Review 是增强功能，不是核心功能。
 
 ---
 
 ## 架构组成
 
-### 1. 触发器（Trigger）
+整个机制由 6 个核心组件构成，协同完成自我改进循环。
+
+### 组件 1：触发器（Trigger）
+
+触发器负责检测何时启动 Background Review。系统采用双触发器设计，分别针对 Memory 和 Skill 的不同特性。
 
 #### Memory Review 触发器
 - **触发条件**：基于对话回合数（turn-based）
@@ -52,15 +63,28 @@ if (agent._skill_nudge_interval > 0
     agent._iters_since_skill = 0
 ```
 
-**关键差异**：
-- Memory 按**对话回合**计数（用户提问 → Agent 完整响应 = 1 回合）
-- Skill 按**工具迭代**计数（每次 API 调用 + 工具执行 = 1 次迭代）
+#### 设计差异的原因
 
----
+**Memory 按回合计数**：
+- 关注用户的长期偏好和个人信息
+- 这些信息通常在对话的开头或结尾透露
+- 按回合计数更符合"每 N 次对话检查一次"的语义
 
-### 2. 启动器（Spawner）
+**Skill 按迭代计数**：
+- 关注技术路径和工作流程
+- 复杂任务可能在一个回合内有多次工具调用
+- 按迭代计数能更准确地反映"工作量"
 
-位置：`agent/conversation_loop.py:~4055`
+### 组件 2：启动器（Spawner）
+
+启动器负责在满足触发条件时创建并启动 Background Review 线程。
+
+**位置**：`agent/conversation_loop.py:~4055`
+
+**启动条件**：
+1. 有最终响应（`final_response` 存在）
+2. 未被中断（`not interrupted`）
+3. 至少一个触发器激活
 
 ```python
 if final_response and not interrupted and (_should_review_memory or _should_review_skills):
@@ -74,23 +98,18 @@ if final_response and not interrupted and (_should_review_memory or _should_revi
         pass  # Background review is best-effort
 ```
 
-**启动条件**：
-1. 有最终响应（`final_response` 存在）
-2. 未被中断（`not interrupted`）
-3. 至少一个触发器激活
-
 **传递数据**：
-- `messages_snapshot`：当前对话历史的快照（深拷贝）
+- `messages_snapshot`：当前对话历史的深拷贝
 - `review_memory`：是否需要 review memory
 - `review_skills`：是否需要 review skills
 
 ---
 
-### 3. Review Prompt 生成器
+### 组件 3：Review Prompt 生成器
 
-位置：`agent/background_review.py:34-227`
+根据触发器组合选择不同的 prompt 模板，指导 Review Agent 的决策行为。
 
-根据触发器组合选择不同的 prompt：
+**位置**：`agent/background_review.py:34-227`
 
 | 触发器组合 | Prompt 常量 | 长度 |
 |-----------|------------|------|
@@ -98,18 +117,21 @@ if final_response and not interrupted and (_should_review_memory or _should_revi
 | Skill only | `_SKILL_REVIEW_PROMPT` | ~144 行 |
 | Both | `_COMBINED_REVIEW_PROMPT` | ~227 行 |
 
-**Prompt 核心指令**：
+#### Memory Review Prompt 核心指令
 
-#### Memory Review Prompt
 ```
 关注两个维度：
 1. 用户透露的个人信息（角色、偏好、期望）
 2. 用户对 Agent 行为的期望（工作风格、操作方式）
 
-如果没有值得保存的内容，回复 "Nothing to save." 并停止。
+If something stands out, save it using the memory tool.
+If nothing is worth saving, just say 'Nothing to save.' and stop.
 ```
 
-#### Skill Review Prompt
+**决策权**：完全交给大模型判断
+
+#### Skill Review Prompt 核心指令
+
 ```
 目标：维护 CLASS-LEVEL 技能库，而非平铺的一次性技能列表
 
@@ -130,13 +152,17 @@ if final_response and not interrupted and (_should_review_memory or _should_revi
 • 会话特定的瞬态错误
 ```
 
+**决策倾向**：鼓励积极保存，但仍然允许"什么都不做"
+
 ---
 
-### 4. Review Agent（Fork）
+### 组件 4：Review Agent（Fork）
 
-位置：`agent/background_review.py:_run_review_in_thread`
+Review Agent 是一个独立的 AIAgent 实例，通过 Fork 机制实现隔离执行。
 
-#### 4.1 Fork 配置
+**位置**：`agent/background_review.py:_run_review_in_thread`
+
+#### Fork 配置
 
 ```python
 review_agent = AIAgent(
@@ -145,7 +171,7 @@ review_agent = AIAgent(
     quiet_mode=True,
     platform=agent.platform,
     provider=agent.provider,
-    api_mode=_parent_api_mode,  # codex_app_server → codex_responses
+    api_mode=_parent_api_mode,
     base_url=_parent_runtime.get("base_url"),
     api_key=_parent_runtime.get("api_key"),
     credential_pool=getattr(agent, "_credential_pool", None),
@@ -156,12 +182,13 @@ review_agent = AIAgent(
 )
 ```
 
-**关键继承**：
+#### 关键继承
+
 - `_memory_store`：指向父 Agent 的 memory 存储（MEMORY.md/USER.md）
 - `_cached_system_prompt`：复用父 Agent 的系统提示（命中 prefix cache）
 - `session_id`：使用父 Agent 的 session_id（保证缓存键一致）
 
-#### 4.2 工具白名单
+#### 工具白名单
 
 ```python
 review_whitelist = {
@@ -184,7 +211,7 @@ set_thread_tool_whitelist(
 **拒绝的工具**：
 - 所有其他工具（terminal、web_search、file_read 等）
 
-#### 4.3 安全防护
+#### 安全防护
 
 ```python
 def _bg_review_auto_deny(command, description, **kwargs):
@@ -202,7 +229,7 @@ _set_approval_callback(_bg_review_auto_deny)
 - 任何危险命令自动拒绝（防止死锁）
 - 清理时移除 callback（防止线程复用污染）
 
-#### 4.4 静默执行
+#### 静默执行
 
 ```python
 with open(os.devnull, "w", encoding="utf-8") as _devnull, \
@@ -221,9 +248,11 @@ with open(os.devnull, "w", encoding="utf-8") as _devnull, \
 
 ---
 
-### 5. 动作摘要器（Action Summarizer）
+### 组件 5：动作摘要器（Action Summarizer）
 
-位置：`agent/background_review.py:summarize_background_review_actions`
+动作摘要器负责提取 Review Agent 执行的成功操作，生成用户可读的摘要。
+
+**位置**：`agent/background_review.py:summarize_background_review_actions`
 
 #### 工作流程
 
@@ -260,16 +289,18 @@ if content_str in existing_tool_contents:
     continue
 ```
 
-**为什么需要去重**：
+**去重原因**：
 - Review agent 继承了 `conversation_history`
 - 如果不去重，会把父 Agent 的旧操作当作新操作展示
 - 参见 issue #14944
 
 ---
 
-### 6. 结果通知器（Notifier）
+### 组件 6：结果通知器（Notifier）
 
-位置：`agent/background_review.py:506-518`
+结果通知器负责将 Review 结果通知给用户。
+
+**位置**：`agent/background_review.py:506-518`
 
 ```python
 if actions:
@@ -303,29 +334,31 @@ if actions:
 
 ## 写入决策机制
 
-### 谁决定是否写入？
+### 决策主体
 
-**答案：大模型（Review Agent）决定**
+**核心原则：大模型（Review Agent）决定是否写入**
 
-Background Review 机制本身**不保证**一定会写入文件。整个决策流程是：
+Background Review 机制本身不保证一定会写入文件。整个决策流程由大模型根据 prompt 指导和对话内容分析来完成。
+
+### 决策流程
 
 ```
-1. 触发器激活（回合数/迭代数达到阈值）
-   ↓
-2. 启动 Review Agent（Fork 的 AIAgent）
-   ↓
-3. Review Agent 读取 review prompt + 对话历史
-   ↓
-4. 大模型分析对话内容
-   ↓
-5. 大模型决定：
-   ├─ 有值得保存的内容 → 调用 memory/skill_manage 工具 → 写入文件
-   └─ 没有值得保存的内容 → 回复 "Nothing to save." → 不调用工具 → 不写入
-   ↓
-6. 提取成功的工具调用
-   ↓
-7. 如果有工具调用 → 显示通知
-   如果没有工具调用 → 静默结束（用户看不到任何提示）
+触发器激活
+  ↓
+启动 Review Agent（Fork 的 AIAgent）
+  ↓
+读取 review prompt + 对话历史
+  ↓
+大模型分析对话内容
+  ↓
+大模型决定：
+  ├─ 有值得保存的内容 → 调用 memory/skill_manage 工具 → 写入文件
+  └─ 没有值得保存的内容 → 回复 "Nothing to save." → 不调用工具 → 不写入
+  ↓
+提取成功的工具调用
+  ↓
+如果有工具调用 → 显示通知
+如果没有工具调用 → 静默结束（用户看不到任何提示）
 ```
 
 ### Prompt 中的决策指导
@@ -356,7 +389,7 @@ just say 'Nothing to save.' and stop. Otherwise, act.
 
 **决策倾向**：鼓励积极保存，但仍然允许"什么都不做"
 
-### 什么时候会写入？
+### 写入场景分析
 
 #### Memory 写入场景
 
@@ -429,9 +462,9 @@ Review Agent 调用：skill_manage(action="patch", skill_name="typescript-develo
 用户看到：💾 Self-improvement review: Skill "typescript-development" updated
 ```
 
-### 为什么这样设计？
+### 设计理由
 
-#### 1. 避免噪音
+#### 避免噪音
 
 如果每次 review 都显示"已检查，无需保存"，会产生大量无用通知：
 
@@ -449,37 +482,21 @@ Review Agent 调用：skill_manage(action="patch", skill_name="typescript-develo
 （只在有实际变更时通知）
 ```
 
-#### 2. 信任大模型的判断
+#### 信任大模型的判断
 
 - Review prompt 已经提供了详细的决策指导
 - 大模型能够理解上下文，判断是否值得保存
 - 人工规则无法覆盖所有边界情况
 
-#### 3. 最佳努力原则
+#### 最佳努力原则
 
 - Review 是增强功能，不是核心功能
 - 即使大模型判断错误（该保存的没保存），也不影响主流程
 - 用户可以通过显式命令（`/remember`）强制保存
 
-### 调试：查看 Review Agent 的决策
-
-如果想知道 Review Agent 为什么没有保存，可以：
-
-```python
-# 1. 启用 verbose 模式
-export HERMES_VERBOSE=1
-
-# 2. 查看 review agent 的完整对话
-tail -f ~/.hermes/agent.log | grep -A 50 "Background review"
-
-# 3. 手动触发 review（测试用）
-agent._turns_since_memory = agent._memory_nudge_interval
-# 下次对话后会触发，可以观察 review agent 的输出
-```
-
 ---
 
-## 执行时序图
+## 执行时序
 
 ```
 用户提问
@@ -510,7 +527,7 @@ run_conversation 开始
 
 ## 关键设计决策
 
-### 1. 为什么 Memory 按回合计数，Skill 按迭代计数？
+### 为什么 Memory 按回合计数，Skill 按迭代计数？
 
 **Memory**：
 - 关注用户的**长期偏好**和**个人信息**
@@ -522,7 +539,7 @@ run_conversation 开始
 - 复杂任务可能在一个回合内有多次工具调用
 - 按迭代计数能更准确地反映"工作量"
 
-### 2. 为什么要 Fork 一个新的 Agent？
+### 为什么要 Fork 一个新的 Agent？
 
 **隔离性**：
 - 主 Agent 的工具集可能很大（terminal、web、file 等）
@@ -537,7 +554,7 @@ run_conversation 开始
 - 继承父 Agent 的 `_cached_system_prompt`
 - 命中 Anthropic 的 prefix cache（节省 ~26% 成本）
 
-### 3. 为什么要 `skip_memory=True`？
+### 为什么要 `skip_memory=True`？
 
 **问题**：
 - 如果不设置，Fork 的 `AIAgent.__init__` 会重建 `_memory_manager`
@@ -554,7 +571,7 @@ run_conversation 开始
 - 手动绑定 `_memory_store`：指向父 Agent 的本地存储
 - Review 写入的 memory 仍然落盘（MEMORY.md/USER.md）
 
-### 4. 为什么要去重 tool messages？
+### 为什么要去重 tool messages？
 
 **场景**：
 ```python
@@ -575,6 +592,109 @@ review_agent.run_conversation(conversation_history=messages)
 - 记录 `prior_snapshot` 中所有 `tool_call_id`
 - 扫描 review messages 时跳过已存在的 ID
 - 参见 issue #14944
+
+---
+
+## 性能优化
+
+### Prefix Cache 复用
+
+**优化前**：
+- Review agent 重建系统提示
+- 每次 review 都是 cache miss
+- 成本：~100% 系统提示 token
+
+**优化后**：
+```python
+review_agent._cached_system_prompt = agent._cached_system_prompt
+review_agent.session_start = agent.session_start
+review_agent.session_id = agent.session_id
+```
+- 复用父 Agent 的缓存
+- 命中率：~95%+
+- 成本降低：~26%（参见 PR #17276）
+
+### 工具集配置复用
+
+```python
+review_agent = AIAgent(
+    enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+    disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+)
+```
+
+**原因**：
+- Anthropic 的 cache key 包含 `tools[]` 数组
+- 必须保证 tools 定义字节级一致
+- 运行时通过白名单限制实际可调用的工具
+
+### 静默输出
+
+```python
+with contextlib.redirect_stdout(_devnull), \
+     contextlib.redirect_stderr(_devnull):
+    review_agent.suppress_status_output = True
+    review_agent.run_conversation(...)
+```
+
+**收益**：
+- 避免 I/O 开销
+- 避免日志写入
+- 只保留最终摘要
+
+---
+
+## 故障处理
+
+### Review 失败不影响主流程
+
+```python
+try:
+    agent._spawn_background_review(...)
+except Exception:
+    pass  # Background review is best-effort
+```
+
+**设计原则**：
+- Review 是增强功能，不是核心功能
+- 失败时静默降级
+- 不阻塞用户的下一次交互
+
+### 危险命令自动拒绝
+
+```python
+def _bg_review_auto_deny(command, description, **kwargs):
+    logger.warning("Background review auto-denied dangerous command: %s", command)
+    return "deny"
+```
+
+**防护场景**：
+- Review agent 尝试执行 shell 命令
+- 尝试调用非白名单工具
+- 触发 approval guard
+
+### 线程清理
+
+```python
+finally:
+    try:
+        review_agent.shutdown_memory_provider()
+    except Exception:
+        pass
+    try:
+        review_agent.close()
+    except Exception:
+        pass
+    try:
+        _set_approval_callback(None)
+    except Exception:
+        pass
+```
+
+**清理项**：
+- Memory provider 连接
+- Agent 资源
+- 线程局部存储（TLS）
 
 ---
 
@@ -623,7 +743,7 @@ agent._skill_nudge_interval = 0
 
 ### 关键测试场景
 
-#### 1. 清理顺序测试
+#### 清理顺序测试
 ```python
 def test_background_review_shuts_down_memory_provider_before_close():
     # 验证 shutdown_memory_provider() 在 close() 之前调用
@@ -635,7 +755,7 @@ def test_background_review_shuts_down_memory_provider_before_close():
     ]
 ```
 
-#### 2. 安全回调测试
+#### 安全回调测试
 ```python
 def test_background_review_installs_auto_deny_approval_callback():
     # 验证 review 线程安装了非交互式 callback
@@ -644,7 +764,7 @@ def test_background_review_installs_auto_deny_approval_callback():
     assert observed["after_finally"] is None  # 清理后为空
 ```
 
-#### 3. 外部插件隔离测试
+#### 外部插件隔离测试
 ```python
 def test_background_review_fork_skips_external_memory_plugins():
     # 验证 skip_memory=True 被传递
@@ -653,119 +773,16 @@ def test_background_review_fork_skips_external_memory_plugins():
 
 ---
 
-## 性能优化
-
-### 1. Prefix Cache 复用
-
-**优化前**：
-- Review agent 重建系统提示
-- 每次 review 都是 cache miss
-- 成本：~100% 系统提示 token
-
-**优化后**：
-```python
-review_agent._cached_system_prompt = agent._cached_system_prompt
-review_agent.session_start = agent.session_start
-review_agent.session_id = agent.session_id
-```
-- 复用父 Agent 的缓存
-- 命中率：~95%+
-- 成本降低：~26%（参见 PR #17276）
-
-### 2. 工具集配置复用
-
-```python
-review_agent = AIAgent(
-    enabled_toolsets=getattr(agent, "enabled_toolsets", None),
-    disabled_toolsets=getattr(agent, "disabled_toolsets", None),
-)
-```
-
-**原因**：
-- Anthropic 的 cache key 包含 `tools[]` 数组
-- 必须保证 tools 定义字节级一致
-- 运行时通过白名单限制实际可调用的工具
-
-### 3. 静默输出
-
-```python
-with contextlib.redirect_stdout(_devnull), \
-     contextlib.redirect_stderr(_devnull):
-    review_agent.suppress_status_output = True
-    review_agent.run_conversation(...)
-```
-
-**收益**：
-- 避免 I/O 开销
-- 避免日志写入
-- 只保留最终摘要
-
----
-
-## 故障处理
-
-### 1. Review 失败不影响主流程
-
-```python
-try:
-    agent._spawn_background_review(...)
-except Exception:
-    pass  # Background review is best-effort
-```
-
-**设计原则**：
-- Review 是增强功能，不是核心功能
-- 失败时静默降级
-- 不阻塞用户的下一次交互
-
-### 2. 危险命令自动拒绝
-
-```python
-def _bg_review_auto_deny(command, description, **kwargs):
-    logger.warning("Background review auto-denied dangerous command: %s", command)
-    return "deny"
-```
-
-**防护场景**：
-- Review agent 尝试执行 shell 命令
-- 尝试调用非白名单工具
-- 触发 approval guard
-
-### 3. 线程清理
-
-```python
-finally:
-    try:
-        review_agent.shutdown_memory_provider()
-    except Exception:
-        pass
-    try:
-        review_agent.close()
-    except Exception:
-        pass
-    try:
-        _set_approval_callback(None)
-    except Exception:
-        pass
-```
-
-**清理项**：
-- Memory provider 连接
-- Agent 资源
-- 线程局部存储（TLS）
-
----
-
 ## 调试技巧
 
-### 1. 查看 Review Prompt
+### 查看 Review Prompt
 
 ```python
 from agent.background_review import _COMBINED_REVIEW_PROMPT
 print(_COMBINED_REVIEW_PROMPT)
 ```
 
-### 2. 手动触发 Review
+### 手动触发 Review
 
 ```python
 agent._turns_since_memory = agent._memory_nudge_interval
@@ -773,7 +790,7 @@ agent._iters_since_skill = agent._skill_nudge_interval
 # 下次对话结束后会触发 review
 ```
 
-### 3. 查看 Review 日志
+### 查看 Review 日志
 
 ```bash
 # 启用 verbose 模式
@@ -783,7 +800,7 @@ export HERMES_VERBOSE=1
 tail -f ~/.hermes/agent.log | grep "background review"
 ```
 
-### 4. 禁用 Review（调试时）
+### 禁用 Review（调试时）
 
 ```python
 agent._memory_nudge_interval = 0
@@ -809,9 +826,6 @@ agent._skill_nudge_interval = 0
 - `tests/run_agent/test_background_review_cache_parity.py`
 - `tests/run_agent/test_background_review_toolset_restriction.py`
 
-### 文档
-- `references/self-improvement-loop.md` - 设计文档（如果存在）
-
 ---
 
 ## 总结
@@ -823,5 +837,7 @@ Background Review 是一个精心设计的自我改进机制，通过以下手�
 3. **缓存优化**：继承系统提示和配置，降低 API 成本 ~26%
 4. **静默运行**：后台线程 + 输出重定向，用户无感知
 5. **最佳努力**：失败静默降级，不阻塞主流程
+6. **LLM 决策**：由大模型根据 prompt 指导判断是否写入，避免硬编码规则
 
 这个机制让 Hermes Agent 能够在每次交互中积累知识，持续优化自己的行为模式和技能库，真正实现了"越用越聪明"的目标。
+
