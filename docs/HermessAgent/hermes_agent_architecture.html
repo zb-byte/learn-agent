@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hermes Agent 架构图</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --c-bg: #f8fafc;
+      --c-canvas: #ffffff;
+      --c-border: #cbd5e1;
+      --c-text-main: #0f172a;
+      --c-text-sub: #64748b;
+      --c-accent: #3b82f6;
+      --font-ui: 'Inter', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: var(--font-ui);
+      background: var(--c-bg);
+      padding: 40px;
+      min-height: 100vh;
+    }
+
+    .diagram-container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    .diagram-canvas {
+      background: var(--c-canvas);
+      border: 1px solid var(--c-border);
+      padding: 32px;
+      margin-bottom: 24px;
+    }
+
+    .diagram-header {
+      border-bottom: 1px solid var(--c-border);
+      padding-bottom: 16px;
+      margin-bottom: 32px;
+    }
+
+    .diagram-title {
+      font-size: 24px;
+      font-weight: 600;
+      color: var(--c-text-main);
+      margin-bottom: 4px;
+    }
+
+    .diagram-subtitle {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--c-text-sub);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .layer {
+      margin-bottom: 32px;
+    }
+
+    .layer-title {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--c-text-sub);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--c-border);
+    }
+
+    .modules-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+
+    .module {
+      border: 1px solid var(--c-border);
+      padding: 16px;
+      background: var(--c-canvas);
+    }
+
+    .module-name {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--c-text-main);
+      margin-bottom: 8px;
+    }
+
+    .module-desc {
+      font-size: 12px;
+      color: var(--c-text-sub);
+      margin-bottom: 12px;
+      line-height: 1.5;
+    }
+
+    .module-functions {
+      list-style: none;
+    }
+
+    .module-functions li {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--c-text-sub);
+      padding: 4px 0;
+      border-top: 1px solid #e2e8f0;
+    }
+
+    .module-functions li:first-child {
+      border-top: none;
+    }
+
+    .badge {
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      padding: 2px 6px;
+      border: 1px solid var(--c-border);
+      color: var(--c-text-sub);
+      margin-left: 8px;
+    }
+
+    .flow-diagram {
+      margin: 32px 0;
+      padding: 24px;
+      border: 1px solid var(--c-border);
+    }
+
+    .flow-step {
+      display: flex;
+      align-items: center;
+      margin: 12px 0;
+    }
+
+    .flow-arrow {
+      margin: 0 16px;
+      color: var(--c-text-sub);
+    }
+
+    .flow-box {
+      border: 1px solid var(--c-border);
+      padding: 8px 16px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--c-text-main);
+      min-width: 200px;
+    }
+  </style>
+</head>
+<body>
+  <div class="diagram-container">
+    <div class="diagram-canvas">
+      <div class="diagram-header">
+        <div class="diagram-title">Hermes Agent 系统架构</div>
+        <div class="diagram-subtitle">Architecture Overview / v0.14.0</div>
+      </div>
+
+      <!-- Layer 1: 用户接口层 -->
+      <div class="layer">
+        <div class="layer-title">Layer 1: 用户接口层 (User Interface Layer)</div>
+        <div class="modules-grid">
+          <div class="module">
+            <div class="module-name">CLI (cli.py)</div>
+            <div class="module-desc">交互式命令行界面，基于 Rich 和 prompt_toolkit</div>
+            <ul class="module-functions">
+              <li>• 命令解析与分发 (process_command)</li>
+              <li>• 自动补全 (SlashCommandCompleter)</li>
+              <li>• 会话管理 (session_id, history)</li>
+              <li>• 皮肤引擎 (skin_engine)</li>
+              <li>• KawaiiSpinner 动画显示</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">TUI (ui-tui/)</div>
+            <div class="module-desc">基于 Ink (React) 的终端 UI</div>
+            <ul class="module-functions">
+              <li>• entry.tsx, app.tsx</li>
+              <li>• gatewayClient.ts (JSON-RPC)</li>
+              <li>• 组件化界面 (components/)</li>
+              <li>• 实时流式输出</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">Gateway (gateway/)</div>
+            <div class="module-desc">多平台消息网关</div>
+            <ul class="module-functions">
+              <li>• run.py (主网关逻辑)</li>
+              <li>• session.py (会话管理)</li>
+              <li>• platforms/ (Telegram, Discord, Slack...)</li>
+              <li>• 异步消息处理</li>
+              <li>• 平台适配器模式</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- Layer 2: 核心 Agent 层 -->
+      <div class="layer">
+        <div class="layer-title">Layer 2: 核心 Agent 层 (Core Agent Layer)</div>
+        <div class="modules-grid">
+          <div class="module">
+            <div class="module-name">AIAgent (run_agent.py)</div>
+            <div class="module-desc">Agent 主类，管理整个对话生命周期</div>
+            <ul class="module-functions">
+              <li>• __init__ (60+ 参数初始化)</li>
+              <li>• run_conversation() (主循环)</li>
+              <li>• chat() (简化接口)</li>
+              <li>• _build_system_prompt()</li>
+              <li>• 会话状态管理</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">agent_init.py</div>
+            <div class="module-desc">Agent 初始化逻辑 (从 run_agent.py 提取)</div>
+            <ul class="module-functions">
+              <li>• init_agent() (1400+ 行初始化)</li>
+              <li>• 提供商自动检测</li>
+              <li>• 凭证解析</li>
+              <li>• 上下文引擎引导</li>
+              <li>• 工具集验证</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">conversation_loop.py</div>
+            <div class="module-desc">对话循环核心逻辑 (3900+ 行)</div>
+            <ul class="module-functions">
+              <li>• run_conversation() (主循环)</li>
+              <li>• 模型调用与重试</li>
+              <li>• 工具调度</li>
+              <li>• 错误处理与降级</li>
+              <li>• 上下文压缩触发</li>
+              <li>• 预算跟踪</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">agent_runtime_helpers.py</div>
+            <div class="module-desc">运行时辅助函数</div>
+            <ul class="module-functions">
+              <li>• 消息格式转换</li>
+              <li>• 流式响应处理</li>
+              <li>• 工具调用解析</li>
+              <li>• 回调触发</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- Layer 3: 模型适配层 -->
+      <div class="layer">
+        <div class="layer-title">Layer 3: 模型适配层 (Model Adapter Layer)</div>
+        <div class="modules-grid">
+          <div class="module">
+            <div class="module-name">anthropic_adapter.py</div>
+            <div class="module-desc">Anthropic Messages API 适配器</div>
+            <ul class="module-functions">
+              <li>• OpenAI → Anthropic 格式转换</li>
+              <li>• OAuth / API Key 认证</li>
+              <li>• 思考模式配置 (adaptive/extended)</li>
+              <li>• 缓存控制 (cache_control)</li>
+              <li>• max_tokens 自动计算</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">gemini_native_adapter.py</div>
+            <div class="module-desc">Google Gemini 原生 API 适配器</div>
+            <ul class="module-functions">
+              <li>• 消息格式转换</li>
+              <li>• 工具调用映射</li>
+              <li>• 流式响应处理</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">bedrock_adapter.py</div>
+            <div class="module-desc">AWS Bedrock 适配器</div>
+            <ul class="module-functions">
+              <li>• boto3 客户端管理</li>
+              <li>• 凭证链解析</li>
+              <li>• 消息格式适配</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">codex_responses_adapter.py</div>
+            <div class="module-desc">Codex Responses API 适配器</div>
+            <ul class="module-functions">
+              <li>• 响应格式转换</li>
+              <li>• 工具调用 ID 生成</li>
+              <li>• 消息摘要</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- Layer 4: 工具系统层 -->
+      <div class="layer">
+        <div class="layer-title">Layer 4: 工具系统层 (Tool System Layer)</div>
+        <div class="modules-grid">
+          <div class="module">
+            <div class="module-name">model_tools.py</div>
+            <div class="module-desc">工具编排层，公共 API</div>
+            <ul class="module-functions">
+              <li>• get_tool_definitions()</li>
+              <li>• handle_function_call()</li>
+              <li>• check_toolset_requirements()</li>
+              <li>• 异步桥接 (_run_async)</li>
+              <li>• 工具集解析</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">tools/registry.py</div>
+            <div class="module-desc">工具注册中心</div>
+            <ul class="module-functions">
+              <li>• register() (工具注册)</li>
+              <li>• discover_builtin_tools()</li>
+              <li>• ToolEntry 元数据</li>
+              <li>• check_fn TTL 缓存</li>
+              <li>• 动态 schema 覆盖</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">tools/*.py</div>
+            <div class="module-desc">80+ 工具实现</div>
+            <ul class="module-functions">
+              <li>• terminal_tool.py (命令执行)</li>
+              <li>• file_tools.py (文件操作)</li>
+              <li>• browser_tool.py (浏览器自动化)</li>
+              <li>• delegate_tool.py (子 Agent)</li>
+              <li>• 每个工具自注册到 registry</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">toolsets.py</div>
+            <div class="module-desc">工具集定义</div>
+            <ul class="module-functions">
+              <li>• _HERMES_CORE_TOOLS 列表</li>
+              <li>• resolve_toolset()</li>
+              <li>• validate_toolset()</li>
+              <li>• 组合工具集 (research, development...)</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- Layer 5: 记忆与上下文层 -->
+      <div class="layer">
+        <div class="layer-title">Layer 5: 记忆与上下文层 (Memory & Context Layer)</div>
+        <div class="modules-grid">
+          <div class="module">
+            <div class="module-name">memory_manager.py</div>
+            <div class="module-desc">记忆管理器，协调多个记忆提供商</div>
+            <ul class="module-functions">
+              <li>• MemoryManager 类</li>
+              <li>• add_provider() (注册提供商)</li>
+              <li>• prefetch_all() (预取记忆)</li>
+              <li>• sync_all() (同步记忆)</li>
+              <li>• StreamingContextScrubber (流式清理)</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">context_compressor.py</div>
+            <div class="module-desc">自动上下文窗口压缩</div>
+            <ul class="module-functions">
+              <li>• ContextCompressor 类</li>
+              <li>• compress_if_needed()</li>
+              <li>• 保护头尾上下文</li>
+              <li>• 工具输出修剪</li>
+              <li>• LLM 摘要生成</li>
+              <li>• 迭代摘要更新</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">prompt_builder.py</div>
+            <div class="module-desc">系统提示词组装</div>
+            <ul class="module-functions">
+              <li>• build_system_prompt()</li>
+              <li>• build_skills_system_prompt()</li>
+              <li>• build_context_files_prompt()</li>
+              <li>• 扫描 HERMES.md / AGENTS.md</li>
+              <li>• 注入检测 (威胁模式扫描)</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">prompt_caching.py</div>
+            <div class="module-desc">Anthropic 提示词缓存</div>
+            <ul class="module-functions">
+              <li>• apply_anthropic_cache_control()</li>
+              <li>• 缓存点标记</li>
+              <li>• 5 分钟 TTL 管理</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- Layer 6: 支持系统层 -->
+      <div class="layer">
+        <div class="layer-title">Layer 6: 支持系统层 (Support Systems Layer)</div>
+        <div class="modules-grid">
+          <div class="module">
+            <div class="module-name">credential_pool.py</div>
+            <div class="module-desc">凭证池管理</div>
+            <ul class="module-functions">
+              <li>• CredentialPool 类</li>
+              <li>• 多凭证轮换</li>
+              <li>• 速率限制跟踪</li>
+              <li>• 凭证健康检查</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">error_classifier.py</div>
+            <div class="module-desc">API 错误分类器</div>
+            <ul class="module-functions">
+              <li>• classify_api_error()</li>
+              <li>• FailoverReason 枚举</li>
+              <li>• 重试策略决策</li>
+              <li>• 降级触发</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">retry_utils.py</div>
+            <div class="module-desc">重试工具</div>
+            <ul class="module-functions">
+              <li>• jittered_backoff()</li>
+              <li>• 指数退避</li>
+              <li>• 抖动算法</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">rate_limit_tracker.py</div>
+            <div class="module-desc">速率限制跟踪</div>
+            <ul class="module-functions">
+              <li>• 每提供商速率跟踪</li>
+              <li>• 冷却时间管理</li>
+              <li>• 自动恢复</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">iteration_budget.py</div>
+            <div class="module-desc">迭代预算管理</div>
+            <ul class="module-functions">
+              <li>• IterationBudget 类</li>
+              <li>• 父子预算共享</li>
+              <li>• 预算耗尽检测</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">display.py</div>
+            <div class="module-desc">显示与 UI 辅助</div>
+            <ul class="module-functions">
+              <li>• KawaiiSpinner (动画 spinner)</li>
+              <li>• build_tool_preview()</li>
+              <li>• get_cute_tool_message()</li>
+              <li>• 工具失败检测</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- Layer 7: 数据持久化层 -->
+      <div class="layer">
+        <div class="layer-title">Layer 7: 数据持久化层 (Data Persistence Layer)</div>
+        <div class="modules-grid">
+          <div class="module">
+            <div class="module-name">hermes_state.py</div>
+            <div class="module-desc">会话数据库 (SQLite + FTS5)</div>
+            <ul class="module-functions">
+              <li>• SessionDB 类</li>
+              <li>• create_session() / get_session()</li>
+              <li>• update_system_prompt()</li>
+              <li>• FTS5 全文搜索</li>
+              <li>• 会话历史持久化</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">trajectory_compressor.py</div>
+            <div class="module-desc">轨迹压缩与保存</div>
+            <ul class="module-functions">
+              <li>• 对话轨迹格式化</li>
+              <li>• JSONL 保存</li>
+              <li>• 成功/失败轨迹分离</li>
+            </ul>
+          </div>
+          <div class="module">
+            <div class="module-name">checkpoint_manager.py</div>
+            <div class="module-desc">检查点管理</div>
+            <ul class="module-functions">
+              <li>• 会话快照</li>
+              <li>• 回滚支持</li>
+              <li>• 检查点恢复</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- 数据流图 -->
+      <div class="flow-diagram">
+        <div style="font-family: var(--font-mono); font-size: 12px; font-weight: 600; margin-bottom: 16px; color: var(--c-text-main);">
+          核心数据流 (Core Data Flow)
+        </div>
+
+        <div class="flow-step">
+          <div class="flow-box">用户输入<br/><span style="font-size: 9px; color: var(--c-text-sub);">CLI / TUI / Gateway</span></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box">AIAgent.run_conversation()<br/><span style="font-size: 9px; color: var(--c-text-sub);">conversation_loop.py</span></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box">构建系统提示词<br/><span style="font-size: 9px; color: var(--c-text-sub);">prompt_builder.py</span></div>
+        </div>
+
+        <div class="flow-step">
+          <div class="flow-box">加载记忆上下文<br/><span style="font-size: 9px; color: var(--c-text-sub);">memory_manager.py</span></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box">获取工具定义<br/><span style="font-size: 9px; color: var(--c-text-sub);">model_tools.py</span></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box">模型适配器转换<br/><span style="font-size: 9px; color: var(--c-text-sub);">anthropic_adapter.py</span></div>
+        </div>
+
+        <div class="flow-step">
+          <div class="flow-box">调用 LLM API<br/><span style="font-size: 9px; color: var(--c-text-sub);">OpenAI / Anthropic SDK</span></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box">解析响应<br/><span style="font-size: 9px; color: var(--c-text-sub);">tool_calls / content</span></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box">工具调度<br/><span style="font-size: 9px; color: var(--c-text-sub);">handle_function_call()</span></div>
+        </div>
+
+        <div class="flow-step">
+          <div class="flow-box">执行工具<br/><span style="font-size: 9px; color: var(--c-text-sub);">tools/*.py handlers</span></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box">返回结果<br/><span style="font-size: 9px; color: var(--c-text-sub);">tool_result message</span></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box">继续循环或返回<br/><span style="font-size: 9px; color: var(--c-text-sub);">max_iterations 检查</span></div>
+        </div>
+
+        <div class="flow-step">
+          <div class="flow-box">上下文压缩 (可选)<br/><span style="font-size: 9px; color: var(--c-text-sub);">context_compressor.py</span></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box">同步记忆<br/><span style="font-size: 9px; color: var(--c-text-sub);">memory_manager.sync_all()</span></div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box">保存会话<br/><span style="font-size: 9px; color: var(--c-text-sub);">SessionDB</span></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>
